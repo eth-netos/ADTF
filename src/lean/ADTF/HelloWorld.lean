@@ -1,7 +1,7 @@
 import Kraken.AArch64.Syntax
 
-#print Kraken.AArch64.Syntax.Operation
+#print Operation
 
-theorem 1 + 1 = 2 := by refl
+theorem one_plus_one : 1 + 1 = 2 := by rfl
 
 #print "Hello World"
