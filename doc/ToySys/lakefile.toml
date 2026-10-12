@@ -1,0 +1,11 @@
+name = "ToySys"
+version = "0.1.0"
+defaultTargets = ["ToySys"]
+
+[leanOptions]
+autoImplicit = false
+relaxedAutoImplicit = false
+
+[[lean_lib]]
+name = "ToySys"
+roots = ["ISA"]
