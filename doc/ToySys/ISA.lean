@@ -212,48 +212,91 @@ typically by constraining the final `pc`. -/
 def Machine.wp (prog : Program) (post : State → Prop) (s : State) : Prop :=
   eventually (Machine.step prog) post s
 
+/-! ## Stepping through a program -/
+
+/-- Splits one machine step into the fetch and the execution of a given instruction. -/
+theorem Machine.step_of_fetch {prog : Program} {s : State} {post : State → Prop} (i : Instr)
+    (hfetch : prog s.pc = some i) (h : i.interp s post) : Machine.step prog s post := by
+  simp only [Machine.step, hfetch]
+  exact h
+
+/-- `instr i` symbolically executes one instruction of a goal `eventually (Machine.step prog) post s`.
+It applies `eventually_cps`, checks that the instruction at the current `pc` is indeed `i`, and
+simplifies through `Instr.interp`, using the hypotheses in the context (e.g. about memory contents).
+
+The argument is redundant, since the instruction is determined by the program and the `pc`, but it
+makes proof scripts readable, and unlike a comment it is checked.
+
+The program must be a `Program.ofList` and the `pc` must simplify to a literal. -/
+syntax "instr " term : tactic
+
+macro_rules
+  | `(tactic| instr $i) => `(tactic| (
+    refine eventually_cps (Machine.step_of_fetch $i ?_ ?_)
+    focus first
+      | (simp [*, Program.ofList, State.next, State.branch, State.setPc, State.setReg,
+           State.setMem]
+         done)
+      | fail "instr: the instruction at the current pc is not the given one"
+    simp [*, Instr.interp, State.next, State.branch, State.setPc, State.setReg, State.setMem,
+      Operand.eval]))
+
 /-! ## Example: the maximum of three numbers -/
 
 /-- Computes the unsigned maximum of `X0`, `X1` and `X2` into `X0`. -/
 def max3 : Program := .ofList 0x1000 [
-  /- 0x1000 -/ .cmp .X0 (.reg .X1),
-  /- 0x1004 -/ .bcond .HS 8,
-  /- 0x1008 -/ .mov .X0 (.reg .X1),
-  /- 0x100c -/ .cmp .X0 (.reg .X2),
-  /- 0x1010 -/ .bcond .HS 8,
-  /- 0x1014 -/ .mov .X0 (.reg .X2)
+  .cmp .X0 (.reg .X1),
+  .bcond .HS 8,
+  .mov .X0 (.reg .X1),
+  .cmp .X0 (.reg .X2),
+  .bcond .HS 8,
+  .mov .X0 (.reg .X2)
 ]
-
-/-- Executes one instruction of `max3`: applies `eventually_cps` and simplifies through
-`Machine.step` (the fetch) and `Instr.interp` (the execution). -/
-local macro "max3_step" : tactic => `(tactic| (
-  apply eventually_cps
-  simp [Machine.step, max3, Program.ofList, Instr.interp,
-    State.next, State.branch, State.setPc, State.setReg, Operand.eval]))
 
 theorem max3_correct (a b c : Word) (s : State) (hpc : s.pc = 0x1000)
     (ha : s.regs .X0 = a) (hb : s.regs .X1 = b) (hc : s.regs .X2 = c) :
     Machine.wp max3
       (fun s' => s'.pc = 0x1018 ∧ (s'.regs .X0 = a ∨ s'.regs .X0 = b ∨ s'.regs .X0 = c) ∧
         a ≤ s'.regs .X0 ∧ b ≤ s'.regs .X0 ∧ c ≤ s'.regs .X0) s := by
-  obtain ⟨regs, flags, mem, pc⟩ := s
-  subst hpc ha hb hc
-  unfold Machine.wp
-  max3_step -- 0x1000: cmp
-  max3_step -- 0x1004: bcond
+  unfold Machine.wp max3
+  instr .cmp .X0 (.reg .X1)
+  instr .bcond .HS 8
   split
-  · max3_step -- 0x100c: cmp
-    max3_step -- 0x1010: bcond
+  · instr .cmp .X0 (.reg .X2)
+    instr .bcond .HS 8
     split
     · exact .done (by grind [Cond.holds, Flags.ofSub])
-    · max3_step -- 0x1014: mov
+    · instr .mov .X0 (.reg .X2)
       exact .done (by grind [Cond.holds, Flags.ofSub])
-  · max3_step -- 0x1008: mov
-    max3_step -- 0x100c: cmp
-    max3_step -- 0x1010: bcond
+  · instr .mov .X0 (.reg .X1)
+    instr .cmp .X0 (.reg .X2)
+    instr .bcond .HS 8
     split
     · exact .done (by grind [Cond.holds, Flags.ofSub])
-    · max3_step -- 0x1014: mov
+    · instr .mov .X0 (.reg .X2)
       exact .done (by grind [Cond.holds, Flags.ofSub])
+
+/-! ## Example: swapping two words in memory -/
+
+/-- Swaps the words stored at the addresses in `X0` and `X1`, using `X2` and `X3` as scratch. -/
+def swap : Program := .ofList 0x2000 [
+  .ldr .X2 .X0 0,
+  .ldr .X3 .X1 0,
+  .str .X3 .X0 0,
+  .str .X2 .X1 0
+]
+
+theorem swap_correct (p q v w : Word) (s : State) (hpc : s.pc = 0x2000)
+    (hp : s.regs .X0 = p) (hq : s.regs .X1 = q) (hpq : p ≠ q)
+    (hv : s.mem p = some v) (hw : s.mem q = some w) :
+    Machine.wp swap
+      (fun s' => s'.pc = 0x2010 ∧ s'.mem p = some w ∧ s'.mem q = some v ∧
+        ∀ a, a ≠ p → a ≠ q → s'.mem a = s.mem a) s := by
+  unfold Machine.wp swap
+  instr .ldr .X2 .X0 0
+  instr .ldr .X3 .X1 0
+  instr .str .X3 .X0 0
+  instr .str .X2 .X1 0
+  exact .done (by grind)
 
 end ToySys
