@@ -299,4 +299,21 @@ theorem swap_correct (p q v w : Word) (s : State) (hpc : s.pc = 0x2000)
   instr .str .X2 .X1 0
   exact .done (by grind)
 
+/-! ## Test: `instr` rejects a wrong instruction -/
+
+/--
+error: instr: the instruction at the current pc is not the given one
+case refine_1
+s : State
+hpc : s.pc = 8192
+⊢ Program.ofList 8192
+      [Instr.ldr Reg.X2 Reg.X0 0, Instr.ldr Reg.X3 Reg.X1 0, Instr.str Reg.X3 Reg.X0 0, Instr.str Reg.X2 Reg.X1 0]
+      s.pc =
+    some (Instr.ldr Reg.X2 Reg.X1 0)
+-/
+#guard_msgs in
+example (s : State) (hpc : s.pc = 0x2000) : Machine.wp swap (fun _ => True) s := by
+  unfold Machine.wp swap
+  instr .ldr .X2 .X1 0
+
 end ToySys
