@@ -40,7 +40,27 @@ inductive Operand
   | imm (v : Word)
   deriving DecidableEq, Repr
 
-inductive Cond | EQ | NE | HS | LO | HI | LS | GE | LT | GT | LE
+inductive Cond
+  /-- Equal: after `cmp a b`, holds if `a = b`. -/
+  | EQ
+  /-- Not equal: after `cmp a b`, holds if `a ≠ b`. -/
+  | NE
+  /-- Unsigned higher or same: after `cmp a b`, holds if `a ≥ b` as unsigned numbers. -/
+  | HS
+  /-- Unsigned lower: after `cmp a b`, holds if `a < b` as unsigned numbers. -/
+  | LO
+  /-- Unsigned higher: after `cmp a b`, holds if `a > b` as unsigned numbers. -/
+  | HI
+  /-- Unsigned lower or same: after `cmp a b`, holds if `a ≤ b` as unsigned numbers. -/
+  | LS
+  /-- Signed greater or equal: after `cmp a b`, holds if `a ≥ b` as signed numbers. -/
+  | GE
+  /-- Signed less than: after `cmp a b`, holds if `a < b` as signed numbers. -/
+  | LT
+  /-- Signed greater than: after `cmp a b`, holds if `a > b` as signed numbers. -/
+  | GT
+  /-- Signed less or equal: after `cmp a b`, holds if `a ≤ b` as signed numbers. -/
+  | LE
   deriving DecidableEq, Repr
 
 abbrev Label := String
