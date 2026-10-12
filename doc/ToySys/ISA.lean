@@ -9,12 +9,16 @@ A massively simplified version of the AArch64 syntax and semantics of Kraken
 
 Simplifications compared to Kraken:
 * Only 64-bit registers and 64-bit operations, so nothing is parameterized by a bit width.
-* A single flat `Instr` type, which also contains labels.
+* A single flat `Instr` type.
 * No stack pointer and no zero register.
 * Memory is a partial map from addresses to whole 64-bit words instead of bytes.
 * No `Effects` type: the semantics of an instruction is directly a weakest precondition
   (`Instr.wp`), and programs get an instance of the `WP` class of the standard library
   (`Std.Internal.Do.WP`), so that `vcgen` can be used to verify them.
+
+This is closer to machine code than to assembly: there are no labels, the state has a program
+counter, a program is a map from addresses to instructions, every instruction occupies 4 bytes, and
+branches are relative to the address of the branch instruction.
 
 Only the standard library is used, no Mathlib.
 -/
@@ -63,11 +67,7 @@ inductive Cond
   | LE
   deriving DecidableEq, Repr
 
-abbrev Label := String
-
 inductive Instr
-  /-- Pseudo-instruction marking a branch target; does nothing when executed. -/
-  | label (l : Label)
   | mov (dst : Reg) (src : Operand)
   | add (dst src1 : Reg) (src2 : Operand)
   | sub (dst src1 : Reg) (src2 : Operand)
@@ -81,16 +81,27 @@ inductive Instr
   | ldr (dst base : Reg) (off : Word)
   /-- Stores a word at address `base + off`. -/
   | str (src base : Reg) (off : Word)
-  | b (target : Label)
-  | bcond (cond : Cond) (target : Label)
-  | cbz (r : Reg) (target : Label)
-  | cbnz (r : Reg) (target : Label)
+  /-- Branches to the address of this instruction plus `off`. -/
+  | b (off : Word)
+  /-- Branches by `off` if `cond` holds. -/
+  | bcond (cond : Cond) (off : Word)
+  /-- Branches by `off` if `r` is zero. -/
+  | cbz (r : Reg) (off : Word)
+  /-- Branches by `off` if `r` is not zero. -/
+  | cbnz (r : Reg) (off : Word)
   /-- Permanently undefined instruction: executing it is always an error. -/
   | udf
   deriving DecidableEq, Repr
 
-/-- A program is a list of instructions. Execution ends successfully when it falls off the end. -/
-abbrev Program := List Instr
+/-- A program maps addresses to instructions. Execution ends successfully when the program counter
+reaches an address that holds no instruction. -/
+abbrev Program := Word → Option Instr
+
+/-- The program that holds the instructions `is` at addresses `base`, `base + 4`, `base + 8`, ...
+and nothing elsewhere. -/
+def Program.ofList (base : Word) : List Instr → Program
+  | [] => fun _ => none
+  | i :: is => fun a => if a = base then some i else Program.ofList (base + 4) is a
 
 /-! ## Machine state -/
 
@@ -108,12 +119,23 @@ structure State where
   regs : Reg → Word
   flags : Flags
   mem : Mem
+  /-- The address of the instruction that is executed next. -/
+  pc : Word
 
 def State.setReg (s : State) (r : Reg) (v : Word) : State :=
   { s with regs := fun r' => if r' = r then v else s.regs r' }
 
 def State.setMem (s : State) (a : Word) (v : Word) : State :=
   { s with mem := fun a' => if a' = a then some v else s.mem a' }
+
+def State.setPc (s : State) (a : Word) : State :=
+  { s with pc := a }
+
+/-- Advances the program counter to the following instruction. -/
+def State.next (s : State) : State := s.setPc (s.pc + 4)
+
+/-- Moves the program counter by `off`, relative to the current instruction. -/
+def State.branch (s : State) (off : Word) : State := s.setPc (s.pc + off)
 
 def Operand.eval (o : Operand) (s : State) : Word := match o with
   | .reg r => s.regs r
@@ -141,105 +163,114 @@ def Cond.holds (c : Cond) (f : Flags) : Bool := match c with
 
 /-! ## Semantics -/
 
-/-- Weakest precondition of a single instruction: `i.wp next jmp s` holds if executing `i` in
-state `s` is safe and either falls through into a state satisfying `next` or jumps to a label `l`
-in a state satisfying `jmp l`. -/
-def Instr.wp (i : Instr) (next : State → Prop) (jmp : Label → State → Prop) (s : State) : Prop :=
+/-- Weakest precondition of a single instruction: `i.wp post s` holds if executing `i` in state `s`
+is safe and leads to a state satisfying `post`. `s.pc` is the address of `i`, and the resulting
+state's `pc` is the address of the instruction to execute next. -/
+def Instr.wp (i : Instr) (post : State → Prop) (s : State) : Prop :=
   match i with
-  | .label _ => next s
-  | .mov dst src => next (s.setReg dst (src.eval s))
-  | .add dst src1 src2 => next (s.setReg dst (s.regs src1 + src2.eval s))
-  | .sub dst src1 src2 => next (s.setReg dst (s.regs src1 - src2.eval s))
-  | .mul dst src1 src2 => next (s.setReg dst (s.regs src1 * s.regs src2))
-  | .and dst src1 src2 => next (s.setReg dst (s.regs src1 &&& src2.eval s))
-  | .cmp src1 src2 => next { s with flags := .ofSub (s.regs src1) (src2.eval s) }
+  | .mov dst src => post (s.setReg dst (src.eval s)).next
+  | .add dst src1 src2 => post (s.setReg dst (s.regs src1 + src2.eval s)).next
+  | .sub dst src1 src2 => post (s.setReg dst (s.regs src1 - src2.eval s)).next
+  | .mul dst src1 src2 => post (s.setReg dst (s.regs src1 * s.regs src2)).next
+  | .and dst src1 src2 => post (s.setReg dst (s.regs src1 &&& src2.eval s)).next
+  | .cmp src1 src2 => post { s with flags := .ofSub (s.regs src1) (src2.eval s) }.next
   | .csel dst src1 src2 cond =>
-    next (s.setReg dst (if cond.holds s.flags then s.regs src1 else s.regs src2))
-  | .ldr dst base off => ∃ v, s.mem (s.regs base + off) = some v ∧ next (s.setReg dst v)
+    post (s.setReg dst (if cond.holds s.flags then s.regs src1 else s.regs src2)).next
+  | .ldr dst base off => ∃ v, s.mem (s.regs base + off) = some v ∧ post (s.setReg dst v).next
   | .str src base off =>
-    (s.mem (s.regs base + off)).isSome ∧ next (s.setMem (s.regs base + off) (s.regs src))
-  | .b target => jmp target s
-  | .bcond cond target => if cond.holds s.flags then jmp target s else next s
-  | .cbz r target => if s.regs r = 0 then jmp target s else next s
-  | .cbnz r target => if s.regs r ≠ 0 then jmp target s else next s
+    (s.mem (s.regs base + off)).isSome ∧ post (s.setMem (s.regs base + off) (s.regs src)).next
+  | .b off => post (s.branch off)
+  | .bcond cond off => if cond.holds s.flags then post (s.branch off) else post s.next
+  | .cbz r off => if s.regs r = 0 then post (s.branch off) else post s.next
+  | .cbnz r off => if s.regs r ≠ 0 then post (s.branch off) else post s.next
   | .udf => False
 
-theorem Instr.wp_mono {i : Instr} {next next' : State → Prop} {jmp jmp' : Label → State → Prop}
-    (hnext : ∀ s, next s → next' s) (hjmp : ∀ l s, jmp l s → jmp' l s) :
-    ∀ s, i.wp next jmp s → i.wp next' jmp' s := by
+theorem Instr.wp_mono {i : Instr} {post post' : State → Prop}
+    (hpost : ∀ s, post s → post' s) : ∀ s, i.wp post s → i.wp post' s := by
   intro s h
   cases i <;> simp only [Instr.wp] at h ⊢ <;> grind
 
-/-- A program together with the instructions that remain to be executed. This is the program type
-that gets a `WP` instance: the whole program `prog` is needed to resolve branch targets, and `vcgen`
-makes progress by matching on the first instruction of `pc`. -/
-structure Code where
-  prog : Program
-  pc : List Instr
-
-/-- `Code.jump prog code l` is the code following the first occurrence of label `l` in `code`.
-Jumping to a label that does not exist is an error. -/
-def Code.jump (prog : Program) (code : List Instr) (l : Label) : Code :=
-  match code with
-  | [] => ⟨prog, [.udf]⟩
-  | i :: rest =>
-    match i with
-    | .label l' => if l' = l then ⟨prog, rest⟩ else Code.jump prog rest l
-    | _ => Code.jump prog rest l
-
-/-- Weakest precondition of running code until it falls off the end of the program. It is defined
+/-- Weakest precondition of running a program until the program counter leaves it. It is defined
 inductively, so it expresses total correctness: loops have to terminate. -/
-inductive Exec : Code → (State → Prop) → State → Prop
-  | done {prog : Program} {Q : State → Prop} {s : State} : Q s → Exec ⟨prog, []⟩ Q s
-  | step {prog : Program} {i : Instr} {rest : List Instr} {Q : State → Prop} {s : State}
-      (next : State → Prop) (jmp : Label → State → Prop) :
-      i.wp next jmp s →
-      (∀ s', next s' → Exec ⟨prog, rest⟩ Q s') →
-      (∀ l s', jmp l s' → Exec (Code.jump prog prog l) Q s') →
-      Exec ⟨prog, i :: rest⟩ Q s
+inductive Exec (prog : Program) (Q : State → Prop) : State → Prop
+  | done {s : State} : prog s.pc = none → Q s → Exec prog Q s
+  | step {s : State} {i : Instr} (mid : State → Prop) :
+      prog s.pc = some i →
+      i.wp mid s →
+      (∀ s', mid s' → Exec prog Q s') →
+      Exec prog Q s
 
-theorem Exec.mono {c : Code} {Q Q' : State → Prop} {s : State}
-    (hQ : ∀ s, Q s → Q' s) (h : Exec c Q s) : Exec c Q' s := by
+theorem Exec.mono {prog : Program} {Q Q' : State → Prop} {s : State}
+    (hQ : ∀ s, Q s → Q' s) (h : Exec prog Q s) : Exec prog Q' s := by
   induction h with
-  | done h => exact .done (hQ _ h)
-  | step next jmp hi _ _ ih₁ ih₂ =>
-    exact .step next jmp hi (fun s' h => ih₁ s' h hQ) (fun l s' h => ih₂ l s' h hQ)
+  | done hpc h => exact .done hpc (hQ _ h)
+  | step mid hpc hi _ ih => exact .step mid hpc hi ih
 
-theorem Exec.nil_iff {prog : Program} {Q : State → Prop} {s : State} :
-    Exec ⟨prog, []⟩ Q s ↔ Q s :=
-  ⟨fun h => by cases h; assumption, .done⟩
-
-theorem Exec.cons_iff {prog : Program} {i : Instr} {rest : List Instr} {Q : State → Prop}
-    {s : State} :
-    Exec ⟨prog, i :: rest⟩ Q s ↔
-      i.wp (Exec ⟨prog, rest⟩ Q) (fun l => Exec (Code.jump prog prog l) Q) s := by
+/-- One step of `Exec`: fetch the instruction at the program counter and execute it. -/
+theorem Exec.iff {prog : Program} {Q : State → Prop} {s : State} :
+    Exec prog Q s ↔
+      match prog s.pc with
+      | none => Q s
+      | some i => i.wp (Exec prog Q) s := by
   constructor
   · intro h
     cases h with
-    | step next jmp hi hnext hjmp => exact Instr.wp_mono hnext hjmp s hi
-  · exact fun h => .step _ _ h (fun _ h => h) (fun _ _ h => h)
+    | done hpc h => rw [hpc]; exact h
+    | step mid hpc hi hmid => rw [hpc]; exact Instr.wp_mono hmid s hi
+  · intro h
+    split at h
+    · next hpc => exact .done hpc h
+    · next i hpc => exact .step _ hpc h (fun _ h => h)
 
 /-! ## `WP` instance -/
+
+/-- The program type that gets a `WP` instance, so that `vcgen` can make progress by matching on it.
+It stands for setting the program counter to `pc`, executing `instr` as if it had been fetched from
+there (`none` meaning that there is no instruction, so execution ends), and then continuing to run
+`prog`. -/
+structure Code where
+  prog : Program
+  pc : Word
+  instr : Option Instr
+
+/-- Running `prog` starting at address `a`. -/
+def Program.runFrom (prog : Program) (a : Word) : Code := ⟨prog, a, prog a⟩
+
+def Code.wp (c : Code) (Q : State → Prop) (s : State) : Prop :=
+  match c.instr with
+  | none => Q (s.setPc c.pc)
+  | some i => i.wp (Exec c.prog Q) (s.setPc c.pc)
+
+theorem Code.wp_mono {c : Code} {Q Q' : State → Prop} {s : State}
+    (hQ : ∀ s, Q s → Q' s) (h : c.wp Q s) : c.wp Q' s := by
+  obtain ⟨prog, pc, instr⟩ := c
+  cases instr with
+  | none => exact hQ _ h
+  | some i => exact Instr.wp_mono (fun _ h => h.mono hQ) _ h
 
 abbrev Assn := State → Prop
 
 instance : WP Code Unit Assn EPost.Nil where
-  wpTrans c := ⟨fun Q _ s => Exec c (Q ()) s⟩
-  wp_trans_monotone _ := fun _ _ _ _ _ hQ _ h => h.mono (hQ ())
+  wpTrans c := ⟨fun Q _ s => c.wp (Q ()) s⟩
+  wp_trans_monotone _ := fun _ _ _ _ _ hQ _ h => Code.wp_mono (hQ ()) h
 
-variable {prog : Program} {rest : List Instr} {Q : Unit → Assn} {epost : EPost.Nil} {s : State}
+variable {prog : Program} {a : Word} {Q : Unit → Assn} {epost : EPost.Nil} {s : State}
 
-theorem wp_nil_eq : wp (Code.mk prog []) Q epost s = Q () s :=
-  propext Exec.nil_iff
+theorem wp_halt_eq : wp (Code.mk prog a none) Q epost s = Q () (s.setPc a) := rfl
 
-theorem wp_cons_eq {i : Instr} : wp (Code.mk prog (i :: rest)) Q epost s =
-    i.wp (wp (Code.mk prog rest) Q epost) (fun l => wp (Code.jump prog prog l) Q epost) s :=
-  propext Exec.cons_iff
+theorem wp_instr_eq {i : Instr} :
+    wp (Code.mk prog a (some i)) Q epost s = i.wp (Exec prog (Q ())) (s.setPc a) := rfl
+
+/-- The meaning of a triple about `prog.runFrom a`: the program counter of the initial state is
+replaced by `a`, and then the program runs according to `Exec`. -/
+theorem wp_runFrom_eq : wp (prog.runFrom a) Q epost s = Exec prog (Q ()) (s.setPc a) :=
+  propext (Exec.iff (s := s.setPc a)).symm
 
 /-! ## Specifications for `vcgen`
 
-One specification per instruction. Each one states the weakest precondition of code starting with
-that instruction in terms of the weakest precondition of the code that is executed next. -/
+One specification per instruction. Each one states the weakest precondition of executing that
+instruction at address `a` in terms of the weakest precondition of running the program from the
+address of the instruction that is executed next. -/
 
 private theorem triple_of_wp {c : Code} {pre : Assn}
     (h : ∀ s, wp c Q epost s = pre s) : Triple c pre Q epost :=
@@ -251,140 +282,144 @@ private theorem triple_of_meet_imp_wp {c : Code} {pre₁ pre₂ : Assn}
     simp only [meet_apply, meet_prop_eq_and] at hs
     exact h s hs.1 hs.2
 
-/-- Lets `vcgen` resolve branch targets by scanning the program for the label. -/
-@[spec] theorem Code.jump_nil (l : Label) : Code.jump prog [] l = ⟨prog, [.udf]⟩ := by
-  rw [Code.jump]
+/-- `k (Program.ofList base is a)`, in a form that lets `vcgen` evaluate the lookup: it only
+rewrites and splits at the head of the program. -/
+def Program.fetchList (base : Word) (is : List Instr) (a : Word) (k : Option Instr → Code) : Code :=
+  k (Program.ofList base is a)
 
-@[spec] theorem Code.jump_cons (i : Instr) (l : Label) :
-    Code.jump prog (i :: rest) l =
-      match i with
-      | .label l' => if l' = l then ⟨prog, rest⟩ else Code.jump prog rest l
-      | _ => Code.jump prog rest l := by
-  cases i <;> rfl
+/-- Lets `vcgen` fetch instructions of programs given as a list. -/
+@[spec] theorem Program.runFrom_ofList (base : Word) (is : List Instr) :
+    (Program.ofList base is).runFrom a =
+      Program.fetchList base is a (Code.mk (Program.ofList base is) a) := rfl
 
-@[spec] theorem Spec.nil : Triple (Code.mk prog []) (Q ()) Q epost :=
-  triple_of_wp fun _ => wp_nil_eq
+@[spec] theorem Program.fetchList_nil (base : Word) (k : Option Instr → Code) :
+    Program.fetchList base [] a k = k none := rfl
 
-@[spec] theorem Spec.label (l : Label) :
-    Triple (Code.mk prog (.label l :: rest)) (wp (Code.mk prog rest) Q epost) Q epost :=
-  triple_of_wp fun _ => wp_cons_eq
+@[spec] theorem Program.fetchList_cons (base : Word) (i : Instr) (is : List Instr)
+    (k : Option Instr → Code) :
+    Program.fetchList base (i :: is) a k =
+      if a = base then k (some i) else Program.fetchList (base + 4) is a k := by
+  simp only [Program.fetchList, Program.ofList]
+  split <;> rfl
+
+@[spec] theorem Spec.halt : Triple (Code.mk prog a none) (fun s => Q () (s.setPc a)) Q epost :=
+  triple_of_wp fun _ => wp_halt_eq
 
 @[spec] theorem Spec.mov (dst : Reg) (src : Operand) :
-    Triple (Code.mk prog (.mov dst src :: rest))
-      (fun s => wp (Code.mk prog rest) Q epost (s.setReg dst (src.eval s))) Q epost :=
-  triple_of_wp fun _ => wp_cons_eq
+    Triple (Code.mk prog a (some (.mov dst src)))
+      (fun s => wp (prog.runFrom (a + 4)) Q epost (s.setReg dst (src.eval s))) Q epost :=
+  triple_of_wp fun _ => by rw [wp_instr_eq, wp_runFrom_eq]; rfl
 
 @[spec] theorem Spec.add (dst src1 : Reg) (src2 : Operand) :
-    Triple (Code.mk prog (.add dst src1 src2 :: rest))
-      (fun s => wp (Code.mk prog rest) Q epost (s.setReg dst (s.regs src1 + src2.eval s)))
+    Triple (Code.mk prog a (some (.add dst src1 src2)))
+      (fun s => wp (prog.runFrom (a + 4)) Q epost (s.setReg dst (s.regs src1 + src2.eval s)))
       Q epost :=
-  triple_of_wp fun _ => wp_cons_eq
+  triple_of_wp fun _ => by rw [wp_instr_eq, wp_runFrom_eq]; rfl
 
 @[spec] theorem Spec.sub (dst src1 : Reg) (src2 : Operand) :
-    Triple (Code.mk prog (.sub dst src1 src2 :: rest))
-      (fun s => wp (Code.mk prog rest) Q epost (s.setReg dst (s.regs src1 - src2.eval s)))
+    Triple (Code.mk prog a (some (.sub dst src1 src2)))
+      (fun s => wp (prog.runFrom (a + 4)) Q epost (s.setReg dst (s.regs src1 - src2.eval s)))
       Q epost :=
-  triple_of_wp fun _ => wp_cons_eq
+  triple_of_wp fun _ => by rw [wp_instr_eq, wp_runFrom_eq]; rfl
 
 @[spec] theorem Spec.mul (dst src1 src2 : Reg) :
-    Triple (Code.mk prog (.mul dst src1 src2 :: rest))
-      (fun s => wp (Code.mk prog rest) Q epost (s.setReg dst (s.regs src1 * s.regs src2)))
+    Triple (Code.mk prog a (some (.mul dst src1 src2)))
+      (fun s => wp (prog.runFrom (a + 4)) Q epost (s.setReg dst (s.regs src1 * s.regs src2)))
       Q epost :=
-  triple_of_wp fun _ => wp_cons_eq
+  triple_of_wp fun _ => by rw [wp_instr_eq, wp_runFrom_eq]; rfl
 
 @[spec] theorem Spec.and (dst src1 : Reg) (src2 : Operand) :
-    Triple (Code.mk prog (.and dst src1 src2 :: rest))
-      (fun s => wp (Code.mk prog rest) Q epost (s.setReg dst (s.regs src1 &&& src2.eval s)))
+    Triple (Code.mk prog a (some (.and dst src1 src2)))
+      (fun s => wp (prog.runFrom (a + 4)) Q epost (s.setReg dst (s.regs src1 &&& src2.eval s)))
       Q epost :=
-  triple_of_wp fun _ => wp_cons_eq
+  triple_of_wp fun _ => by rw [wp_instr_eq, wp_runFrom_eq]; rfl
 
 @[spec] theorem Spec.cmp (src1 : Reg) (src2 : Operand) :
-    Triple (Code.mk prog (.cmp src1 src2 :: rest))
-      (fun s => wp (Code.mk prog rest) Q epost
+    Triple (Code.mk prog a (some (.cmp src1 src2)))
+      (fun s => wp (prog.runFrom (a + 4)) Q epost
         { s with flags := .ofSub (s.regs src1) (src2.eval s) }) Q epost :=
-  triple_of_wp fun _ => wp_cons_eq
+  triple_of_wp fun _ => by rw [wp_instr_eq, wp_runFrom_eq]; rfl
 
 @[spec] theorem Spec.csel (dst src1 src2 : Reg) (cond : Cond) :
-    Triple (Code.mk prog (.csel dst src1 src2 cond :: rest))
-      (fun s => wp (Code.mk prog rest) Q epost
+    Triple (Code.mk prog a (some (.csel dst src1 src2 cond)))
+      (fun s => wp (prog.runFrom (a + 4)) Q epost
         (s.setReg dst (if cond.holds s.flags then s.regs src1 else s.regs src2))) Q epost :=
-  triple_of_wp fun _ => wp_cons_eq
+  triple_of_wp fun _ => by rw [wp_instr_eq, wp_runFrom_eq]; rfl
 
 @[spec] theorem Spec.ldr (dst base : Reg) (off : Word) :
-    Triple (Code.mk prog (.ldr dst base off :: rest))
+    Triple (Code.mk prog a (some (.ldr dst base off)))
       ((fun s => (s.mem (s.regs base + off)).isSome) ⊓
        (fun s => ∀ v, s.mem (s.regs base + off) = some v →
-          wp (Code.mk prog rest) Q epost (s.setReg dst v))) Q epost :=
+          wp (prog.runFrom (a + 4)) Q epost (s.setReg dst v))) Q epost :=
   triple_of_meet_imp_wp fun s h₁ h₂ => by
     obtain ⟨v, hv⟩ := Option.isSome_iff_exists.mp h₁
-    rw [wp_cons_eq]
-    exact ⟨v, hv, h₂ v hv⟩
+    have h := h₂ v hv
+    rw [wp_runFrom_eq] at h
+    exact ⟨v, hv, h⟩
 
 @[spec] theorem Spec.str (src base : Reg) (off : Word) :
-    Triple (Code.mk prog (.str src base off :: rest))
+    Triple (Code.mk prog a (some (.str src base off)))
       ((fun s => (s.mem (s.regs base + off)).isSome) ⊓
-       (fun s => wp (Code.mk prog rest) Q epost (s.setMem (s.regs base + off) (s.regs src))))
+       (fun s => wp (prog.runFrom (a + 4)) Q epost (s.setMem (s.regs base + off) (s.regs src))))
       Q epost :=
   triple_of_meet_imp_wp fun s h₁ h₂ => by
-    rw [wp_cons_eq]
+    rw [wp_runFrom_eq] at h₂
     exact ⟨h₁, h₂⟩
 
-@[spec] theorem Spec.b (target : Label) :
-    Triple (Code.mk prog (.b target :: rest)) (wp (Code.jump prog prog target) Q epost) Q epost :=
-  triple_of_wp fun _ => wp_cons_eq
+@[spec] theorem Spec.b (off : Word) :
+    Triple (Code.mk prog a (some (.b off))) (wp (prog.runFrom (a + off)) Q epost) Q epost :=
+  triple_of_wp fun _ => by rw [wp_instr_eq, wp_runFrom_eq]; rfl
 
-@[spec] theorem Spec.bcond (cond : Cond) (target : Label) :
-    Triple (Code.mk prog (.bcond cond target :: rest))
-      ((fun s => cond.holds s.flags = true → wp (Code.jump prog prog target) Q epost s) ⊓
-       (fun s => cond.holds s.flags = false → wp (Code.mk prog rest) Q epost s)) Q epost :=
+@[spec] theorem Spec.bcond (cond : Cond) (off : Word) :
+    Triple (Code.mk prog a (some (.bcond cond off)))
+      ((fun s => cond.holds s.flags = true → wp (prog.runFrom (a + off)) Q epost s) ⊓
+       (fun s => cond.holds s.flags = false → wp (prog.runFrom (a + 4)) Q epost s)) Q epost :=
   triple_of_meet_imp_wp fun s h₁ h₂ => by
-    rw [wp_cons_eq]
-    simp only [Instr.wp]
-    split <;> simp_all
+    simp only [wp_runFrom_eq] at h₁ h₂
+    rw [wp_instr_eq]
+    by_cases h : cond.holds s.flags = true <;> simp_all [Instr.wp, State.branch, State.next, State.setPc]
 
-@[spec] theorem Spec.cbz (r : Reg) (target : Label) :
-    Triple (Code.mk prog (.cbz r target :: rest))
-      ((fun s => s.regs r = 0 → wp (Code.jump prog prog target) Q epost s) ⊓
-       (fun s => s.regs r ≠ 0 → wp (Code.mk prog rest) Q epost s)) Q epost :=
+@[spec] theorem Spec.cbz (r : Reg) (off : Word) :
+    Triple (Code.mk prog a (some (.cbz r off)))
+      ((fun s => s.regs r = 0 → wp (prog.runFrom (a + off)) Q epost s) ⊓
+       (fun s => s.regs r ≠ 0 → wp (prog.runFrom (a + 4)) Q epost s)) Q epost :=
   triple_of_meet_imp_wp fun s h₁ h₂ => by
-    rw [wp_cons_eq]
-    simp only [Instr.wp]
-    split <;> simp_all
+    simp only [wp_runFrom_eq] at h₁ h₂
+    rw [wp_instr_eq]
+    by_cases h : s.regs r = 0 <;> simp_all [Instr.wp, State.branch, State.next, State.setPc]
 
-@[spec] theorem Spec.cbnz (r : Reg) (target : Label) :
-    Triple (Code.mk prog (.cbnz r target :: rest))
-      ((fun s => s.regs r ≠ 0 → wp (Code.jump prog prog target) Q epost s) ⊓
-       (fun s => s.regs r = 0 → wp (Code.mk prog rest) Q epost s)) Q epost :=
+@[spec] theorem Spec.cbnz (r : Reg) (off : Word) :
+    Triple (Code.mk prog a (some (.cbnz r off)))
+      ((fun s => s.regs r ≠ 0 → wp (prog.runFrom (a + off)) Q epost s) ⊓
+       (fun s => s.regs r = 0 → wp (prog.runFrom (a + 4)) Q epost s)) Q epost :=
   triple_of_meet_imp_wp fun s h₁ h₂ => by
-    rw [wp_cons_eq]
-    simp only [Instr.wp]
-    split <;> simp_all
+    simp only [wp_runFrom_eq] at h₁ h₂
+    rw [wp_instr_eq]
+    by_cases h : s.regs r = 0 <;> simp_all [Instr.wp, State.branch, State.next, State.setPc]
 
 @[spec] theorem Spec.udf :
-    Triple (Code.mk prog (.udf :: rest)) (fun _ => False) Q epost :=
+    Triple (Code.mk prog a (some .udf)) (fun _ => False) Q epost :=
   Triple.iff.mpr fun _ h => h.elim
 
 /-! ## Example: the maximum of three numbers -/
 
 /-- Computes the unsigned maximum of `X0`, `X1` and `X2` into `X0`. -/
-def max3 : Program := [
-  .cmp .X0 (.reg .X1),
-  .bcond .HS "skip1",
-  .mov .X0 (.reg .X1),
-  .label "skip1",
-  .cmp .X0 (.reg .X2),
-  .bcond .HS "skip2",
-  .mov .X0 (.reg .X2),
-  .label "skip2"
+def max3 : Program := .ofList 0x1000 [
+  /- 0x1000 -/ .cmp .X0 (.reg .X1),
+  /- 0x1004 -/ .bcond .HS 8,
+  /- 0x1008 -/ .mov .X0 (.reg .X1),
+  /- 0x100c -/ .cmp .X0 (.reg .X2),
+  /- 0x1010 -/ .bcond .HS 8,
+  /- 0x1014 -/ .mov .X0 (.reg .X2)
 ]
 
 theorem max3_correct (a b c : Word) :
     ⦃ fun s => s.regs .X0 = a ∧ s.regs .X1 = b ∧ s.regs .X2 = c ⦄
-      Code.mk max3 max3
-    ⦃ fun _ s => (s.regs .X0 = a ∨ s.regs .X0 = b ∨ s.regs .X0 = c) ∧
+      max3.runFrom 0x1000
+    ⦃ fun _ s => s.pc = 0x1018 ∧ (s.regs .X0 = a ∨ s.regs .X0 = b ∨ s.regs .X0 = c) ∧
         a ≤ s.regs .X0 ∧ b ≤ s.regs .X0 ∧ c ≤ s.regs .X0 ⦄ := by
   unfold max3
   vcgen simplifying_assumptions
-  all_goals grind [Cond.holds, Flags.ofSub, Operand.eval, State.setReg]
+  all_goals grind [Cond.holds, Flags.ofSub, Operand.eval, State.setReg, State.setPc]
 
 end ToySys
