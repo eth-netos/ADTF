@@ -1,0 +1,20 @@
+## git
+
+Creating a pretty git history is *not* a goal in this project. The goal is to create an *accurate* history that includes everything that was tried, including failed experiments.
+Therefore, never rewrite git history, and never rebase, but merge instead.
+
+For each prompt that causes you to write code, create at least one commit. It is ok to create commits that don't compile or that fail tests, in order to document what was tried. Mark such commits by prefixing their commit message with `[broken]`. Before creating commits that you think should work, double check by running the build and tests. 
+
+Do not try to imitate the git commit message format of previous commits. Instead, always use the following format: 
+
+* A summary line
+* An empty line as per git conventions
+* A line `Prompt:`
+* An empty line
+* The prompt, verbatim, but wrapped at 72 chars
+* An empty line
+* A line `Outcome:`
+* An empty line
+* A brief summary of what you did, wrapped at 72 chars 
+* An empty line
+* A Co-authored-by trailer where you credit yourself, including the model name and model version number
