@@ -22,13 +22,14 @@ mapped to addresses by a symbol table (`Symbols`).
 
 For a function `f`:
 * `f_code : List Instr` is its code, a closed term that does not depend on where it is loaded.
-* `f_ok` is its correctness theorem.
-* There is no definition named `f`. Instead, `f : Word` is a universally quantified variable of
-  `f_ok` that stands for the address at which `f_code` is loaded, so that it reads like a label:
-  `f + 8` is the address of the third instruction of `f`.
-* `f_ok` has one hypothesis `hf : Loaded syms prog "f" f f_code` for `f` itself and one for each
-  function that it calls. Nothing is assumed about how the code snippets are located relative to each
-  other: if they overlap inconsistently, the hypotheses are contradictory.
+* `f_ok` is its correctness theorem. It has one hypothesis `hf : Loaded prog (syms "f") f_code`
+  for `f` itself and one for each function that it calls. Nothing is assumed about how the code
+  snippets are located relative to each other: if they overlap inconsistently, the hypotheses are
+  contradictory.
+* There is no definition named `f`, and the statement of `f_ok` refers to the address of `f` only as
+  `syms "f"`. The name `f` is reserved for use inside the proof of `f_ok`, as a variable of type
+  `Word` standing for that address, introduced by `generalize syms "f" = f at *`. It then reads
+  like a label: `f + 8` is the address of the third instruction of `f`.
 
 Nothing outside of core Lean is used.
 -/
@@ -126,10 +127,9 @@ abbrev Program := Word → Option Instr
 /-- A symbol table maps function names to addresses. -/
 abbrev Symbols := String → Word
 
-/-- The function `name` is located at address `f` and its code `code` is loaded there: the
-instruction with index `n` is at address `f + 4 * n`. -/
-def Loaded (syms : Symbols) (prog : Program) (name : String) (f : Word) (code : List Instr) : Prop :=
-  syms name = f ∧
+/-- The code `code` is loaded at address `f`: the instruction with index `n` is at address
+`f + 4 * n`. For a function named `"f"`, the address is `syms "f"`. -/
+def Loaded (prog : Program) (f : Word) (code : List Instr) : Prop :=
   ∀ (n : Nat) (i : Instr), code[n]? = some i → prog (f + BitVec.ofNat 64 (4 * n)) = some i
 
 /-! ## Machine state -/
@@ -265,23 +265,20 @@ def Machine.wp (syms : Symbols) (prog : Program) (post : State → Prop) (s : St
 /-! ## Stepping through a program -/
 
 section
-variable {syms : Symbols} {prog : Program} {name : String} {f : Word} {code : List Instr}
+variable {syms : Symbols} {prog : Program} {f : Word} {code : List Instr}
   {i : Instr} {s : State} {post : State → Prop}
 
-/-- The address of a loaded function according to the symbol table. -/
-theorem Loaded.sym (name : String) (h : Loaded syms prog name f code) : syms name = f := h.1
-
 /-- Fetches the instruction at byte offset `off` of a loaded function. -/
-theorem Loaded.fetch (h : Loaded syms prog name f code) (off : Nat)
+theorem Loaded.fetch (h : Loaded prog f code) (off : Nat)
     (hi : code[off / 4]? = some i) (hoff : 4 * (off / 4) = off) :
     prog (f + BitVec.ofNat 64 off) = some i := by
-  have := h.2 _ _ hi
+  have := h _ _ hi
   rwa [hoff] at this
 
 /-- Fetches the first instruction of a loaded function. -/
-theorem Loaded.fetch_zero (h : Loaded syms prog name f code) (hi : code[0]? = some i) :
+theorem Loaded.fetch_zero (h : Loaded prog f code) (hi : code[0]? = some i) :
     prog f = some i := by
-  simpa using h.2 0 i hi
+  simpa using h 0 i hi
 
 /-- Splits one machine step into determining the `pc`, fetching, and executing a given
 instruction. The instruction is executed in `s.setPc a`, which equals `s`, so that the address
@@ -337,7 +334,7 @@ macro_rules
 
 /-- `instr i at f + off` (or `instr i at f` for the first instruction of `f`) symbolically executes
 one instruction of a goal `eventually (Machine.step syms prog) post s`. It applies `eventually_cps`,
-checks by `rfl` that the current `pc` is `f + off`, finds the hypothesis `Loaded syms prog _ f code`
+checks by `rfl` that the current `pc` is `f + off`, finds the hypothesis `Loaded prog f code`
 in the context, checks by `rfl` that the instruction at byte offset `off` of `code` is `i`, and
 simplifies through `Instr.interp`.
 
@@ -348,9 +345,9 @@ What is left depends on the instruction, which has to be written as `.name args`
 recognize it:
 * For a conditional branch (`.bcond`, `.cbz`, `.cbnz`) there are two goals, one for the branch being
   taken and one for it not being taken, each with the condition as a premise to introduce.
-* For `.bl "g"` the goal is the `eventually` goal for the state at the entry of `g`, whose address
-  is taken from the hypothesis `Loaded syms prog "g" g _` in the context. Use `eventually_trans`
-  with `g_ok` to get to the state after the call, and `Machine.wp_of_pc` to continue from there.
+* For `.bl "g"` the goal is the `eventually` goal for the state at the entry of `g`, whose `pc` is
+  `syms "g"`. Use `eventually_trans` with `g_ok` to get to the state after the call, and
+  `Machine.wp_of_pc` to continue from there.
 * For `.ldr` and `.str` the goal still contains the condition that the address is mapped, which is
   left to the user, e.g. by `simp` with the relevant facts about the memory.
 * For all other instructions the goal is the `eventually` goal for the next state.
@@ -365,8 +362,6 @@ macro_rules
     `(tactic| (instr_step .cbz $r $off at $a; refine ite_intro ?_ ?_))
   | `(tactic| instr .cbnz $r $off at $a) =>
     `(tactic| (instr_step .cbnz $r $off at $a; refine ite_intro ?_ ?_))
-  | `(tactic| instr .bl $g at $a) =>
-    `(tactic| (instr_step .bl $g at $a; simp only [Loaded.sym $g (by assumption)]))
   | `(tactic| instr $i at $a) => `(tactic| instr_step $i at $a)
 
 /-! ## Example: the maximum of three numbers -/
@@ -382,14 +377,15 @@ def max3_code : List Instr := [
   .ret .X30
 ]
 
-theorem max3_ok (syms : Symbols) (prog : Program) (max3 : Word)
-    (hmax3 : Loaded syms prog "max3" max3 max3_code)
-    (a b c : Word) (s : State) (hpc : s.pc = max3)
+theorem max3_ok (syms : Symbols) (prog : Program)
+    (hmax3 : Loaded prog (syms "max3") max3_code)
+    (a b c : Word) (s : State) (hpc : s.pc = syms "max3")
     (ha : s.regs .X0 = a) (hb : s.regs .X1 = b) (hc : s.regs .X2 = c) :
     Machine.wp syms prog
       (fun s' => s'.pc = s.regs .X30 ∧
         (s'.regs .X0 = a ∨ s'.regs .X0 = b ∨ s'.regs .X0 = c) ∧
         a ≤ s'.regs .X0 ∧ b ≤ s'.regs .X0 ∧ c ≤ s'.regs .X0) s := by
+  generalize syms "max3" = max3 at *
   refine Machine.wp_of_pc hpc ?_
   instr .cmp .X0 (.reg .X1) at max3
   instr .bcond .HS 8 at max3 + 0x4
@@ -428,15 +424,16 @@ def swap_code : List Instr := [
 
 /-- Besides swapping, `swap` guarantees that it changes no other memory and no registers other than
 `X2` and `X3`. That is more than the ABI demands, and `swap_swap_ok` relies on it. -/
-theorem swap_ok (syms : Symbols) (prog : Program) (swap : Word)
-    (hswap : Loaded syms prog "swap" swap swap_code)
-    (p q v w : Word) (s : State) (hpc : s.pc = swap)
+theorem swap_ok (syms : Symbols) (prog : Program)
+    (hswap : Loaded prog (syms "swap") swap_code)
+    (p q v w : Word) (s : State) (hpc : s.pc = syms "swap")
     (hp : s.regs .X0 = p) (hq : s.regs .X1 = q) (hpq : p ≠ q)
     (hv : s.mem p = some v) (hw : s.mem q = some w) :
     Machine.wp syms prog
       (fun s' => s'.pc = s.regs .X30 ∧
         s'.mem p = some w ∧ s'.mem q = some v ∧ (∀ a, a ≠ p → a ≠ q → s'.mem a = s.mem a) ∧
         ∀ r, r ≠ .X2 → r ≠ .X3 → s'.regs r = s.regs r) s := by
+  generalize syms "swap" = swap at *
   refine Machine.wp_of_pc hpc ?_
   instr .ldr .X2 .X0 0 at swap
   simp [hp, hv]
@@ -460,26 +457,27 @@ def swap_swap_code : List Instr := [
   .ret .X9
 ]
 
-theorem swap_swap_ok (syms : Symbols) (prog : Program) (swap_swap swap : Word)
-    (hswap_swap : Loaded syms prog "swap_swap" swap_swap swap_swap_code)
-    (hswap : Loaded syms prog "swap" swap swap_code)
-    (p q v w : Word) (s : State) (hpc : s.pc = swap_swap)
+theorem swap_swap_ok (syms : Symbols) (prog : Program)
+    (hswap_swap : Loaded prog (syms "swap_swap") swap_swap_code)
+    (hswap : Loaded prog (syms "swap") swap_code)
+    (p q v w : Word) (s : State) (hpc : s.pc = syms "swap_swap")
     (hp : s.regs .X0 = p) (hq : s.regs .X1 = q) (hpq : p ≠ q)
     (hv : s.mem p = some v) (hw : s.mem q = some w) :
     Machine.wp syms prog
       (fun s' => s'.pc = s.regs .X30 ∧ s'.mem = s.mem ∧
         ∀ r ∈ Reg.calleeSaved, s'.regs r = s.regs r) s := by
+  generalize syms "swap_swap" = swap_swap at *
   refine Machine.wp_of_pc hpc ?_
   instr .mov .X9 (.reg .X30) at swap_swap
   instr .bl "swap" at swap_swap + 0x4
   refine eventually_trans
-    (swap_ok syms prog swap hswap p q v w _ rfl (by simp [hp]) (by simp [hq]) hpq hv hw) ?_
+    (swap_ok syms prog hswap p q v w _ rfl (by simp [hp]) (by simp [hq]) hpq hv hw) ?_
   intro s1 ⟨hpc1, hp1, hq1, hmem1, hregs1⟩
   simp at hpc1 hp1 hq1 hmem1 hregs1
   refine Machine.wp_of_pc hpc1 ?_
   instr .bl "swap" at swap_swap + 0x8
   refine eventually_trans
-    (swap_ok syms prog swap hswap p q w v _ rfl (by simp [hregs1, hp]) (by simp [hregs1, hq])
+    (swap_ok syms prog hswap p q w v _ rfl (by simp [hregs1, hp]) (by simp [hregs1, hq])
       hpq hp1 hq1) ?_
   intro s2 ⟨hpc2, hp2, hq2, hmem2, hregs2⟩
   simp at hpc2 hp2 hq2 hmem2 hregs2
@@ -505,16 +503,17 @@ is not definitionally equal to the right-hand side
 case refine_2
 syms : Symbols
 prog : Program
-swap : Word
-hswap : Loaded syms prog "swap" swap swap_code
 s : State
+swap : Word
+hswap : Loaded prog swap swap_code
 hpc : s.pc = swap
 ⊢ swap_code[0]? = some (Instr.ldr Reg.X2 Reg.X1 0)
 -/
 #guard_msgs in
-example (syms : Symbols) (prog : Program) (swap : Word)
-    (hswap : Loaded syms prog "swap" swap swap_code) (s : State) (hpc : s.pc = swap) :
+example (syms : Symbols) (prog : Program)
+    (hswap : Loaded prog (syms "swap") swap_code) (s : State) (hpc : s.pc = syms "swap") :
     Machine.wp syms prog (fun _ => True) s := by
+  generalize syms "swap" = swap at *
   refine Machine.wp_of_pc hpc ?_
   instr .ldr .X2 .X1 0 at swap
 
@@ -527,16 +526,17 @@ is not definitionally equal to the right-hand side
 case refine_1
 syms : Symbols
 prog : Program
-swap : Word
-hswap : Loaded syms prog "swap" swap swap_code
 s : State
+swap : Word
+hswap : Loaded prog swap swap_code
 hpc : s.pc = swap
 ⊢ (s.setPc swap).pc = swap + 4
 -/
 #guard_msgs in
-example (syms : Symbols) (prog : Program) (swap : Word)
-    (hswap : Loaded syms prog "swap" swap swap_code) (s : State) (hpc : s.pc = swap) :
+example (syms : Symbols) (prog : Program)
+    (hswap : Loaded prog (syms "swap") swap_code) (s : State) (hpc : s.pc = syms "swap") :
     Machine.wp syms prog (fun _ => True) s := by
+  generalize syms "swap" = swap at *
   refine Machine.wp_of_pc hpc ?_
   instr .ldr .X3 .X1 0 at swap + 0x4
 
