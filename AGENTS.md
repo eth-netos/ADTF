@@ -4,6 +4,11 @@ Do not write code comments that just narrate what's already clear from the code.
 Do not write comments that read like a response to a particular prompt. Instead, make sure each comment makes sense on its own.
 If the name of a definition contains an abbreviation, expand the abbreviation in a doc comment.
 
+## Code formatting
+
+When you start a new file, make its lines at most 80 characters wide.
+When editing existing files, adapt to the line width used there.
+
 ## Respect decisions from human commits
 
 Before coding, read the output of
