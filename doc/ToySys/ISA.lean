@@ -1,3 +1,4 @@
+import Std.Tactic.BVDecide
 /-!
 # A toy Arm-like instruction set architecture (ISA)
 
@@ -138,12 +139,10 @@ abbrev Program := Word → Option Instr
 /-- A symbol table, usually called `syms`, maps function names to addresses. -/
 abbrev Symbols := String → Word
 
-/-- The code `code` is loaded at address `f`: the instruction with index `n` is at address
-`f + 4 * n`. For a function named `"f"`, the address is `syms "f"`. The definition is phrased in
-terms of the byte offset `off = 4 * n` because that is what appears in addresses. -/
+/-- The `code` is loaded at address `f`. -/
 def Loaded (prog : Program) (f : Word) (code : List Instr) : Prop :=
-  ∀ (off : Word) (i : Instr), code[off.toNat / 4]? = some i → off.toNat % 4 = 0 →
-    prog (f + off) = some i
+  f % 4 = 0 ∧
+  ∀ (i : Nat) (instr : Instr), code[i]? = some instr → prog (f + 4 * i) = some instr
 
 /-! ## Machine state -/
 
@@ -288,30 +287,29 @@ def Machine.wp (syms : Symbols) (prog : Program) (post : State → Prop) (s : St
 
 /-! ## Stepping through a program -/
 
-section
-variable {syms : Symbols} {prog : Program} {f : Word} {code : List Instr}
-  {i : Instr} {s : State} {post : State → Prop}
-
-/-- `SplitAddress a f off` holds if `a = f + off`. Its purpose is to let instance resolution compute
-the address `f` of a function and a byte offset `off` from the shape of an address `a` inside that
-function: an address of the form `f + off` is split at the `+`, and an address of any other form is
-taken to be the address of the function itself. -/
-class SplitAddress (a : Word) (f off : outParam Word) : Prop where
-  eq : a = f + off
-
-instance (priority := low) SplitAddress.start (f : Word) : SplitAddress f f 0 := ⟨by simp⟩
-
-instance SplitAddress.offset (f off : Word) : SplitAddress (f + off) f off := ⟨rfl⟩
-
-/-- Fetches the instruction at address `a`, which has to be inside the code loaded at `f`. -/
-theorem Loaded.fetch {a off : Word} (h : Loaded prog f code) [inst : SplitAddress a f off]
-    (hi : code[off.toNat / 4]? = some i) (hoff : off.toNat % 4 = 0) : prog a = some i :=
-  inst.eq ▸ h off i hi hoff
+/-- Fetches the instruction at `addr`, which has to be inside the code loaded at `f`. -/
+theorem Loaded.fetch {instr : Instr} {addr : Word}  -- <-- determined by the goal
+    {prog : Program} {f : Word} {code : List Instr} -- <-- determined by h
+    (h : Loaded prog f code)   -- <-- determined by `assumption`, picks the last one, brittle
+                               --     if there are multiple `Loaded` assumptions, but ok because
+                               --     later we will ensure that there is only ever one
+    (hm4 : (addr - f) % 4 = 0) -- <-- determined by `simp; try rfl`
+    (hindex : code[((addr - f) / 4).toNat]? = some instr) -- <-- determined by `simp; try rfl`
+     : prog addr = some instr := by
+  rw [<- (h.right ((addr - f) / 4).toNat instr hindex)]
+  congr 1
+  rw [BitVec.natCast_eq_ofNat]
+  rw [BitVec.ofNat_toNat]
+  rw [BitVec.setWidth_eq]
+  rw [show 4 * ((addr - f) / 4) = (addr - f) - (addr - f) % 4 by bv_decide]
+  rw [hm4]
+  bv_decide
 
 /-- Splits one machine step into determining the program counter, fetching, and executing a given
-instruction. The instruction is executed in `s.setPc a`, which equals `s`, so that the address
-arithmetic of the instruction happens on `a` instead of on `s.pc`. -/
-theorem Machine.step_of_fetch (i : Instr) (a : Word) (hpc : s.pc = a) (hfetch : prog a = some i)
+instruction. The instruction is executed in `s.setPc a`, which equals `s`, so that the rest
+of the proof uses the user-provided `a` instead of `s.pc`. -/
+theorem Machine.step_of_fetch {syms : Symbols} {prog : Program} {s : State} {post : State → Prop}
+    (i : Instr) (a : Word) (hpc : s.pc = a) (hfetch : prog a = some i)
     (h : i.interp syms (s.setPc a) post) : Machine.step syms prog s post := by
   subst hpc
   simp only [Machine.step, hfetch]
@@ -320,12 +318,10 @@ theorem Machine.step_of_fetch (i : Instr) (a : Word) (hpc : s.pc = a) (hfetch : 
 /-- Starts or resumes stepping through a program: turns a weakest-precondition (wp) goal about a
 state whose program counter (pc) is known to be `a` into an `eventually` goal about a state whose
 `pc` is syntactically `a`, which is the form that `instr` expects. -/
-theorem Machine.wp_of_pc {a : Word} (hpc : s.pc = a)
+theorem Machine.wp_of_pc {syms : Symbols} {prog : Program} {s : State} {post : State → Prop} {a : Word} (hpc : s.pc = a)
     (h : eventually (Machine.step syms prog) post (s.setPc a)) : Machine.wp syms prog post s := by
   subst hpc
   exact h
-
-end
 
 /-- Introduction rule for if-then-else (ite): proves a goal of the form `if c then p else q`, as
 arises from a conditional branch. -/
@@ -334,22 +330,42 @@ theorem ite_intro {c p q : Prop} [Decidable c] (ht : c → p) (hf : ¬c → q) :
   · next h => exact ht h
   · next h => exact hf h
 
+-- TODO make this as powerful as Rocq's ring_simplify but without Mathlib dependency
+macro "ring_simplify" : tactic => `(tactic|
+  repeat (
+    first
+    | rw [BitVec.add_sub_cancel]
+    | rw [BitVec.add_comm _ _, BitVec.add_sub_cancel]
+    | rw [BitVec.sub_add_cancel]
+    | rw [BitVec.sub_self]
+    | rw [BitVec.add_zero]
+    | rw [BitVec.zero_add]
+    | rw [BitVec.sub_zero]
+  )
+)
+
 /-- The part of `instr` that is the same for all instructions: one step that leaves the goal
 produced by `Instr.interp`. -/
 syntax "instr_step " term " at " term : tactic
 
+macro "dsimp_proj" : tactic =>
+  `(tactic| dsimp (config := { beta := false, zeta := false, iota := false, proj := true }) only)
+
 macro_rules
   | `(tactic| instr_step $i at $a) => `(tactic| (
     refine eventually_cps (Machine.step_of_fetch $i $a ?_ (Loaded.fetch (by assumption) ?_ ?_) ?_)
-    -- The current pc is `a`.
-    rfl
-    -- With `a` split into `f + off`, the instruction at byte offset `off` of the code is `i`,
-    rfl
-    -- and `off` is a multiple of 4.
-    rfl
-    -- `BitVec.add_assoc` turns the next pc into the form `f + off` again.
+    -- The current pc as computed by the proof equals the user-provided instruction address `a`
+    ((try unfold State.setPc);
+      first
+      | bv_decide
+      | (trace_state; fail "bv_decide can't prove that the user-provided instruction address matches the computed pc"))
+    -- The byte offset `a - base` is a multiple of 4
+    bv_decide
+    -- The instruction at byte offset `a - base` of the code is `i`
+    ring_simplify; (try simp); rfl
+    -- simplify remainder of proof
     simp [Instr.interp, State.next, State.branch, State.setPc, State.setReg, State.setMem,
-      Operand.eval, BitVec.add_assoc]))
+        Operand.eval]))
 
 /-- `instr i at a` symbolically executes one instruction of a goal
 `eventually (Machine.step syms prog) post s`: it checks that the program counter of `s` is `a` and
@@ -519,20 +535,11 @@ theorem swap_swap_ok (syms : Symbols) (prog : Program)
 
 /--
 error: Tactic `rfl` failed: The left-hand side
-  swap_code[BitVec.toNat 0 / 4]?
+  swap_code[0]?
 is not definitionally equal to the right-hand side
-  some (Instr.ldr Reg.X2 Reg.X1 0)
-
-case refine_2
-syms : Symbols
-prog : Program
-s : State
-swap : Word
-hswap : Loaded prog swap swap_code
-hpc : s.pc = swap
-⊢ swap_code[BitVec.toNat 0 / 4]? = some (Instr.ldr Reg.X2 Reg.X1 0)
+  some (Instr.ldr Reg.X2 Reg.X1 0#64)
 -/
-#guard_msgs in
+#guard_msgs (substring := true) in
 example (syms : Symbols) (prog : Program)
     (hswap : Loaded prog (syms "swap") swap_code) (s : State) (hpc : s.pc = syms "swap") :
     Machine.wp syms prog (fun _ => True) s := by
@@ -540,22 +547,9 @@ example (syms : Symbols) (prog : Program)
   refine Machine.wp_of_pc hpc ?_
   instr .ldr .X2 .X1 0 at swap
 
-/--
-error: Tactic `rfl` failed: The left-hand side
-  (s.setPc swap).pc
-is not definitionally equal to the right-hand side
-  swap + 4
-
-case refine_1
-syms : Symbols
-prog : Program
-s : State
-swap : Word
-hswap : Loaded prog swap swap_code
-hpc : s.pc = swap
-⊢ (s.setPc swap).pc = swap + 4
--/
-#guard_msgs in
+/-- error: bv_decide can't prove that the user-provided instruction address
+matches the computed pc -/
+#guard_msgs (substring := true) in
 example (syms : Symbols) (prog : Program)
     (hswap : Loaded prog (syms "swap") swap_code) (s : State) (hpc : s.pc = syms "swap") :
     Machine.wp syms prog (fun _ => True) s := by
