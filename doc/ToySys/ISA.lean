@@ -214,32 +214,54 @@ def Machine.wp (prog : Program) (post : State → Prop) (s : State) : Prop :=
 
 /-! ## Stepping through a program -/
 
-/-- Splits one machine step into the fetch and the execution of a given instruction. -/
+/-- Splits one machine step into determining the `pc`, fetching, and executing a given
+instruction. The instruction is executed in `s.setPc a`, which equals `s`, so that the address
+arithmetic of the instruction happens on `a` instead of on `s.pc`. -/
 theorem Machine.step_of_fetch {prog : Program} {s : State} {post : State → Prop} (i : Instr)
-    (hfetch : prog s.pc = some i) (h : i.interp s post) : Machine.step prog s post := by
+    (a : Word) (hpc : s.pc = a) (hfetch : prog a = some i) (h : i.interp (s.setPc a) post) :
+    Machine.step prog s post := by
+  subst hpc
   simp only [Machine.step, hfetch]
   exact h
 
-/-- `instr i` symbolically executes one instruction of a goal `eventually (Machine.step prog) post s`.
-It applies `eventually_cps`, checks that the instruction at the current `pc` is indeed `i`, and
-simplifies through `Instr.interp`, using the hypotheses in the context (e.g. about memory contents).
+/-- `instr i at a` symbolically executes one instruction of a goal
+`eventually (Machine.step prog) post s`. It applies `eventually_cps`, checks that the current `pc`
+is `a` and that the instruction at address `a` is `i`, and simplifies through `Instr.interp`.
 
-The argument is redundant, since the instruction is determined by the program and the `pc`, but it
-makes proof scripts readable, and unlike a comment it is checked.
+Both arguments are redundant, since the `pc` is determined by the state and the instruction by the
+program and the `pc`, but they make proof scripts readable, and unlike comments they are checked.
 
-The program must be a `Program.ofList` and the `pc` must simplify to a literal. -/
-syntax "instr " term : tactic
+`instr i at a using h₁, h₂, ...` additionally passes the given facts to the simplifier that
+executes the instruction, e.g. facts about register and memory contents needed by a load or store.
+Hypotheses in the context are not used unless they are listed there.
 
+The program must be a `Program.ofList`, and `s.pc = a` must hold by assumption or by `rfl`. -/
+syntax "instr " term " at " term (" using " term,+)? : tactic
+
+open Lean in
 macro_rules
-  | `(tactic| instr $i) => `(tactic| (
-    refine eventually_cps (Machine.step_of_fetch $i ?_ ?_)
-    focus first
-      | (simp [*, Program.ofList, State.next, State.branch, State.setPc, State.setReg,
-           State.setMem]
-         done)
-      | fail "instr: the instruction at the current pc is not the given one"
-    simp [*, Instr.interp, State.next, State.branch, State.setPc, State.setReg, State.setMem,
-      Operand.eval]))
+  | `(tactic| instr $i at $a $[using $hs,*]?) => do
+    let hs : Array Term := match hs with
+      | some hs => hs.getElems
+      | none => #[]
+    `(tactic| (
+      refine eventually_cps (Machine.step_of_fetch $i $a ?_ ?_ ?_)
+      focus first
+        | assumption
+        | rfl
+        | fail "instr: the current pc is not the given address"
+      focus first
+        | (simp [Program.ofList]; done)
+        | fail "instr: the instruction at the given address is not the given one"
+      simp [Instr.interp, State.next, State.branch, State.setPc, State.setReg, State.setMem,
+        Operand.eval, $[$hs:term],*]))
+
+/-- Proves a goal of the form `if c then p else q`, as left by `instr` for a conditional branch.
+(`split` does not work on these goals: it fails to simplify the `if` using the new hypothesis.) -/
+theorem ite_intro {c p q : Prop} [Decidable c] (ht : c → p) (hf : ¬c → q) : if c then p else q := by
+  split
+  · next h => exact ht h
+  · next h => exact hf h
 
 /-! ## Example: the maximum of three numbers -/
 
@@ -259,21 +281,21 @@ theorem max3_correct (a b c : Word) (s : State) (hpc : s.pc = 0x1000)
       (fun s' => s'.pc = 0x1018 ∧ (s'.regs .X0 = a ∨ s'.regs .X0 = b ∨ s'.regs .X0 = c) ∧
         a ≤ s'.regs .X0 ∧ b ≤ s'.regs .X0 ∧ c ≤ s'.regs .X0) s := by
   unfold Machine.wp max3
-  instr .cmp .X0 (.reg .X1)
-  instr .bcond .HS 8
-  split
-  · instr .cmp .X0 (.reg .X2)
-    instr .bcond .HS 8
-    split
+  instr .cmp .X0 (.reg .X1) at 0x1000
+  instr .bcond .HS 8 at 0x1004
+  apply ite_intro <;> intro _
+  · instr .cmp .X0 (.reg .X2) at 0x100c
+    instr .bcond .HS 8 at 0x1010
+    apply ite_intro <;> intro _
     · exact .done (by grind [Cond.holds, Flags.ofSub])
-    · instr .mov .X0 (.reg .X2)
+    · instr .mov .X0 (.reg .X2) at 0x1014
       exact .done (by grind [Cond.holds, Flags.ofSub])
-  · instr .mov .X0 (.reg .X1)
-    instr .cmp .X0 (.reg .X2)
-    instr .bcond .HS 8
-    split
+  · instr .mov .X0 (.reg .X1) at 0x1008
+    instr .cmp .X0 (.reg .X2) at 0x100c
+    instr .bcond .HS 8 at 0x1010
+    apply ite_intro <;> intro _
     · exact .done (by grind [Cond.holds, Flags.ofSub])
-    · instr .mov .X0 (.reg .X2)
+    · instr .mov .X0 (.reg .X2) at 0x1014
       exact .done (by grind [Cond.holds, Flags.ofSub])
 
 /-! ## Example: swapping two words in memory -/
@@ -293,27 +315,39 @@ theorem swap_correct (p q v w : Word) (s : State) (hpc : s.pc = 0x2000)
       (fun s' => s'.pc = 0x2010 ∧ s'.mem p = some w ∧ s'.mem q = some v ∧
         ∀ a, a ≠ p → a ≠ q → s'.mem a = s.mem a) s := by
   unfold Machine.wp swap
-  instr .ldr .X2 .X0 0
-  instr .ldr .X3 .X1 0
-  instr .str .X3 .X0 0
-  instr .str .X2 .X1 0
+  instr .ldr .X2 .X0 0 at 0x2000 using hp, hv
+  instr .ldr .X3 .X1 0 at 0x2004 using hq, hw
+  instr .str .X3 .X0 0 at 0x2008 using hp, hv
+  instr .str .X2 .X1 0 at 0x200c using hq, hw, hpq
   exact .done (by grind)
 
-/-! ## Test: `instr` rejects a wrong instruction -/
+/-! ## Tests: `instr` rejects a wrong instruction or a wrong address -/
 
 /--
-error: instr: the instruction at the current pc is not the given one
-case refine_1
+error: instr: the instruction at the given address is not the given one
+case refine_2
 s : State
 hpc : s.pc = 8192
 ⊢ Program.ofList 8192
       [Instr.ldr Reg.X2 Reg.X0 0, Instr.ldr Reg.X3 Reg.X1 0, Instr.str Reg.X3 Reg.X0 0, Instr.str Reg.X2 Reg.X1 0]
-      s.pc =
+      8192 =
     some (Instr.ldr Reg.X2 Reg.X1 0)
 -/
 #guard_msgs in
 example (s : State) (hpc : s.pc = 0x2000) : Machine.wp swap (fun _ => True) s := by
   unfold Machine.wp swap
-  instr .ldr .X2 .X1 0
+  instr .ldr .X2 .X1 0 at 0x2000
+
+/--
+error: instr: the current pc is not the given address
+case refine_1
+s : State
+hpc : s.pc = 8192
+⊢ s.pc = 8196
+-/
+#guard_msgs in
+example (s : State) (hpc : s.pc = 0x2000) : Machine.wp swap (fun _ => True) s := by
+  unfold Machine.wp swap
+  instr .ldr .X2 .X0 0 at 0x2004
 
 end ToySys
