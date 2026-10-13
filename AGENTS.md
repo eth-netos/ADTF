@@ -4,6 +4,10 @@ Do not write code comments that just narrate what's already clear from the code.
 Do not write comments that read like a response to a particular prompt. Instead, make sure each comment makes sense on its own.
 If the name of a definition contains an abbreviation, expand the abbreviation in a doc comment.
 
+## Warnings
+
+When checking the output of build commands, do not only check for success/failure, but also read the warnings. Fix all warnings that have a simple reasonable fix, and tell the user about remaining warnings for which there's no simple fix.
+
 ## git
 
 Creating a pretty git history is *not* a goal in this project. The goal is to create an *accurate* history that includes everything that was tried, including failed experiments.
