@@ -1,0 +1,3 @@
+[submodule "sockeye"]
+	path = sockeye
+	url = https://gitlab.inf.ethz.ch/project-opensockeye/sockeye.git
