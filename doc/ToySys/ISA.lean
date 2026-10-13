@@ -200,12 +200,6 @@ def State.setMem (s : State) (a : Word) (v : Word) : State :=
 def State.setPc (s : State) (a : Word) : State :=
   { s with pc := a }
 
-/-- Advances the program counter to the following instruction. -/
-def State.next (s : State) : State := s.setPc (s.pc + 4)
-
-/-- Moves the program counter by `off`, relative to the current instruction. -/
-def State.branch (s : State) (off : Word) : State := s.setPc (s.pc + off)
-
 /-- Evaluates an operand to its value in state `s`. -/
 def Operand.eval (o : Operand) (s : State) : Word := match o with
   | .reg r => s.regs r
@@ -235,43 +229,51 @@ def Cond.holds (c : Cond) (f : Flags) : Bool := match c with
 /-! ## Semantics -/
 
 /-- Interprets a single instruction, in omnisemantics style: `i.interp syms s
-post` holds if executing `i` in state `s` is safe and leads to a state
-satisfying `post`. `s.pc` is the address of `i`, and the resulting state's `pc`
-is the address of the instruction to execute next. -/
+next jmp` holds if executing `i` in state `s`, where `s.pc` is the address of
+`i`, is safe and either
+* falls through to the following instruction, in a state satisfying `next`, or
+* jumps (`jmp`) to an address `a`, in a state satisfying `jmp a`.
+
+The instruction only decides between the two and computes the target of a jump.
+It does not update the program counter: the states passed to `next` and `jmp`
+still have the `pc` of `s`. -/
 def Instr.interp (syms : Symbols) (i : Instr) (s : State)
-    (post : State → Prop) : Prop :=
+    (next : State → Prop) (jmp : Word → State → Prop) : Prop :=
   match i with
-  | .mov dst src => post (s.setReg dst (src.eval s)).next
-  | .add dst src1 src2 => post (s.setReg dst (s.regs src1 + src2.eval s)).next
-  | .sub dst src1 src2 => post (s.setReg dst (s.regs src1 - src2.eval s)).next
-  | .mul dst src1 src2 => post (s.setReg dst (s.regs src1 * s.regs src2)).next
-  | .and dst src1 src2 => post (s.setReg dst (s.regs src1 &&& src2.eval s)).next
+  | .mov dst src => next (s.setReg dst (src.eval s))
+  | .add dst src1 src2 => next (s.setReg dst (s.regs src1 + src2.eval s))
+  | .sub dst src1 src2 => next (s.setReg dst (s.regs src1 - src2.eval s))
+  | .mul dst src1 src2 => next (s.setReg dst (s.regs src1 * s.regs src2))
+  | .and dst src1 src2 => next (s.setReg dst (s.regs src1 &&& src2.eval s))
   | .cmp src1 src2 =>
-    post { s with flags := .ofSub (s.regs src1) (src2.eval s) }.next
+    next { s with flags := .ofSub (s.regs src1) (src2.eval s) }
   | .csel dst src1 src2 cond =>
-    post (s.setReg dst
-      (if cond.holds s.flags then s.regs src1 else s.regs src2)).next
+    next (s.setReg dst
+      (if cond.holds s.flags then s.regs src1 else s.regs src2))
   | .ldr dst base off =>
-    ∃ v, s.mem (s.regs base + off) = some v ∧ post (s.setReg dst v).next
+    ∃ v, s.mem (s.regs base + off) = some v ∧ next (s.setReg dst v)
   | .str src base off =>
     (s.mem (s.regs base + off)).isSome ∧
-      post (s.setMem (s.regs base + off) (s.regs src)).next
-  | .b off => post (s.branch off)
-  | .bcond cond off =>
-    if cond.holds s.flags then post (s.branch off) else post s.next
-  | .cbz r off => if s.regs r = 0 then post (s.branch off) else post s.next
-  | .cbnz r off => if s.regs r ≠ 0 then post (s.branch off) else post s.next
-  | .bl target => post ((s.setReg .X30 (s.pc + 4)).setPc (syms target))
-  | .ret r => post (s.setPc (s.regs r))
+      next (s.setMem (s.regs base + off) (s.regs src))
+  | .b off => jmp (s.pc + off) s
+  | .bcond cond off => if cond.holds s.flags then jmp (s.pc + off) s else next s
+  | .cbz r off => if s.regs r = 0 then jmp (s.pc + off) s else next s
+  | .cbnz r off => if s.regs r ≠ 0 then jmp (s.pc + off) s else next s
+  | .bl target => jmp (syms target) (s.setReg .X30 (s.pc + 4))
+  | .ret r => jmp (s.regs r) s
   | .udf => False
 
-/-- One step of the machine: fetches the instruction at the program counter and
-executes it. If there is no instruction at that address, the machine is stuck,
-which is an error. -/
+/-- One step of the machine: fetches the instruction at the program counter,
+executes it, and updates the program counter, to the following instruction if
+the instruction fell through and to the target if it jumped. If there is no
+instruction at the program counter, the machine is stuck, which is an error. -/
 def Machine.step (syms : Symbols) (prog : Program) (s : State)
     (post : State → Prop) : Prop :=
   match prog s.pc with
-  | some i => i.interp syms s post
+  | some i =>
+    i.interp syms s
+      (fun s' => post (s'.setPc (s.pc + 4)))
+      (fun a s' => post (s'.setPc a))
   | none => False
 
 /-! ## Omnisemantics for any number of steps -/
@@ -353,7 +355,10 @@ equals `s`, so that the rest of the proof uses the user-provided `a` instead of
 theorem Machine.step_of_fetch {syms : Symbols} {prog : Program} {s : State}
     {post : State → Prop}
     (i : Instr) (a : Word) (hpc : s.pc = a) (hfetch : prog a = some i)
-    (h : i.interp syms (s.setPc a) post) : Machine.step syms prog s post := by
+    (h : i.interp syms (s.setPc a)
+      (fun s' => post (s'.setPc (a + 4)))
+      (fun a' s' => post (s'.setPc a'))) :
+    Machine.step syms prog s post := by
   subst hpc
   simp only [Machine.step, hfetch]
   exact h
@@ -417,8 +422,8 @@ macro_rules
     -- The instruction at byte offset `a - base` of the code is `i`
     ring_simplify; (try simp); rfl
     -- simplify remainder of proof
-    simp [Instr.interp, State.next, State.branch, State.setPc, State.setReg,
-        State.setMem, Operand.eval]))
+    simp [Instr.interp, State.setPc, State.setReg, State.setMem,
+        Operand.eval]))
 
 /-- `instr i at a` symbolically executes one instruction of a goal `eventually
 (Machine.step syms prog) post s`: it checks that the program counter of `s` is
@@ -430,10 +435,10 @@ state and the instruction by the program and the program counter. They are there
 so that a proof script can be read next to a disassembly, and `instr` fails if
 either of them is wrong.
 
-`a` can be any term that is equal to the program counter of `s` by `rfl`. To
-fetch the instruction, `a` is split into the address `f` of a function and an
-offset by `SplitAddress`, and there has to be a hypothesis `Loaded prog f code`
-in the context.
+`a` can be any term that `bv_decide` can show to be equal to the program counter
+of `s`. To fetch the instruction, there has to be a hypothesis
+`Loaded prog f code` in the context such that `a - f` simplifies to the byte
+offset of the instruction in `code`.
 
 What is left depends on the instruction, which has to be written as `.name args`
 for the tactic to recognize it:
