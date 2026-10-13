@@ -224,44 +224,62 @@ theorem Machine.step_of_fetch {prog : Program} {s : State} {post : State → Pro
   simp only [Machine.step, hfetch]
   exact h
 
-/-- `instr i at a` symbolically executes one instruction of a goal
-`eventually (Machine.step prog) post s`. It applies `eventually_cps`, checks that the current `pc`
-is `a` and that the instruction at address `a` is `i`, and simplifies through `Instr.interp`.
+/-- Starts stepping through a program: turns a `Machine.wp` goal about a state whose `pc` is known
+to be `a` into an `eventually` goal about a state whose `pc` is syntactically `a`, which is the form
+that `instr` expects. -/
+theorem Machine.wp_of_pc {prog : Program} {s : State} {post : State → Prop} {a : Word}
+    (hpc : s.pc = a) (h : eventually (Machine.step prog) post (s.setPc a)) :
+    Machine.wp prog post s := by
+  subst hpc
+  exact h
 
-Both arguments are redundant, since the `pc` is determined by the state and the instruction by the
-program and the `pc`, but they make proof scripts readable, and unlike comments they are checked.
-
-`instr i at a using h₁, h₂, ...` additionally passes the given facts to the simplifier that
-executes the instruction, e.g. facts about register and memory contents needed by a load or store.
-Hypotheses in the context are not used unless they are listed there.
-
-The program must be a `Program.ofList`, and `s.pc = a` must hold by assumption or by `rfl`. -/
-syntax "instr " term " at " term (" using " term,+)? : tactic
-
-open Lean in
-macro_rules
-  | `(tactic| instr $i at $a $[using $hs,*]?) => do
-    let hs : Array Term := match hs with
-      | some hs => hs.getElems
-      | none => #[]
-    `(tactic| (
-      refine eventually_cps (Machine.step_of_fetch $i $a ?_ ?_ ?_)
-      focus first
-        | assumption
-        | rfl
-        | fail "instr: the current pc is not the given address"
-      focus first
-        | (simp [Program.ofList]; done)
-        | fail "instr: the instruction at the given address is not the given one"
-      simp [Instr.interp, State.next, State.branch, State.setPc, State.setReg, State.setMem,
-        Operand.eval, $[$hs:term],*]))
-
-/-- Proves a goal of the form `if c then p else q`, as left by `instr` for a conditional branch.
-(`split` does not work on these goals: it fails to simplify the `if` using the new hypothesis.) -/
+/-- Proves a goal of the form `if c then p else q`, as arises from a conditional branch. -/
 theorem ite_intro {c p q : Prop} [Decidable c] (ht : c → p) (hf : ¬c → q) : if c then p else q := by
   split
   · next h => exact ht h
   · next h => exact hf h
+
+/-- The part of `instr` that is the same for all instructions. -/
+syntax "instr_step " term " at " term : tactic
+
+macro_rules
+  | `(tactic| instr_step $i at $a) => `(tactic| (
+    refine eventually_cps (Machine.step_of_fetch $i $a ?_ ?_ ?_)
+    -- the current pc is `a`
+    rfl
+    -- the instruction at address `a` is `i`
+    decide
+    -- execute `i`
+    simp [Instr.interp, State.next, State.branch, State.setPc, State.setReg, State.setMem,
+      Operand.eval]))
+
+/-- `instr i at a` symbolically executes one instruction of a goal
+`eventually (Machine.step prog) post s`. It applies `eventually_cps`, checks by `rfl` that the
+current `pc` is `a`, checks by `decide` that the instruction at address `a` is `i`, and simplifies
+through `Instr.interp`.
+
+Both arguments are redundant, since the `pc` is determined by the state and the instruction by the
+program and the `pc`, but they make proof scripts readable, and unlike comments they are checked.
+
+What is left depends on the instruction, which has to be written as `.name args` for the tactic to
+recognize it:
+* For a conditional branch (`.bcond`, `.cbz`, `.cbnz`) there are two goals, one for the branch being
+  taken and one for it not being taken, each with the condition as a premise to introduce.
+* For `.ldr` and `.str` the goal still contains the condition that the address is mapped, which is
+  left to the user, e.g. by `simp` with the relevant facts about the memory.
+* For all other instructions the goal is the `eventually` goal for the next state.
+
+No hypotheses from the context are used. To get started, use `Machine.wp_of_pc`. -/
+syntax "instr " term " at " term : tactic
+
+macro_rules
+  | `(tactic| instr .bcond $c $off at $a) =>
+    `(tactic| (instr_step .bcond $c $off at $a; refine ite_intro ?_ ?_))
+  | `(tactic| instr .cbz $r $off at $a) =>
+    `(tactic| (instr_step .cbz $r $off at $a; refine ite_intro ?_ ?_))
+  | `(tactic| instr .cbnz $r $off at $a) =>
+    `(tactic| (instr_step .cbnz $r $off at $a; refine ite_intro ?_ ?_))
+  | `(tactic| instr $i at $a) => `(tactic| instr_step $i at $a)
 
 /-! ## Example: the maximum of three numbers -/
 
@@ -280,22 +298,26 @@ theorem max3_correct (a b c : Word) (s : State) (hpc : s.pc = 0x1000)
     Machine.wp max3
       (fun s' => s'.pc = 0x1018 ∧ (s'.regs .X0 = a ∨ s'.regs .X0 = b ∨ s'.regs .X0 = c) ∧
         a ≤ s'.regs .X0 ∧ b ≤ s'.regs .X0 ∧ c ≤ s'.regs .X0) s := by
-  unfold Machine.wp max3
+  refine Machine.wp_of_pc hpc ?_
+  unfold max3
   instr .cmp .X0 (.reg .X1) at 0x1000
   instr .bcond .HS 8 at 0x1004
-  apply ite_intro <;> intro _
-  · instr .cmp .X0 (.reg .X2) at 0x100c
-    instr .bcond .HS 8 at 0x1010
-    apply ite_intro <;> intro _
-    · exact .done (by grind [Cond.holds, Flags.ofSub])
-    · instr .mov .X0 (.reg .X2) at 0x1014
-      exact .done (by grind [Cond.holds, Flags.ofSub])
-  · instr .mov .X0 (.reg .X1) at 0x1008
+  · intro _
     instr .cmp .X0 (.reg .X2) at 0x100c
     instr .bcond .HS 8 at 0x1010
-    apply ite_intro <;> intro _
-    · exact .done (by grind [Cond.holds, Flags.ofSub])
-    · instr .mov .X0 (.reg .X2) at 0x1014
+    · intro _
+      exact .done (by grind [Cond.holds, Flags.ofSub])
+    · intro _
+      instr .mov .X0 (.reg .X2) at 0x1014
+      exact .done (by grind [Cond.holds, Flags.ofSub])
+  · intro _
+    instr .mov .X0 (.reg .X1) at 0x1008
+    instr .cmp .X0 (.reg .X2) at 0x100c
+    instr .bcond .HS 8 at 0x1010
+    · intro _
+      exact .done (by grind [Cond.holds, Flags.ofSub])
+    · intro _
+      instr .mov .X0 (.reg .X2) at 0x1014
       exact .done (by grind [Cond.holds, Flags.ofSub])
 
 /-! ## Example: swapping two words in memory -/
@@ -314,40 +336,49 @@ theorem swap_correct (p q v w : Word) (s : State) (hpc : s.pc = 0x2000)
     Machine.wp swap
       (fun s' => s'.pc = 0x2010 ∧ s'.mem p = some w ∧ s'.mem q = some v ∧
         ∀ a, a ≠ p → a ≠ q → s'.mem a = s.mem a) s := by
-  unfold Machine.wp swap
-  instr .ldr .X2 .X0 0 at 0x2000 using hp, hv
-  instr .ldr .X3 .X1 0 at 0x2004 using hq, hw
-  instr .str .X3 .X0 0 at 0x2008 using hp, hv
-  instr .str .X2 .X1 0 at 0x200c using hq, hw, hpq
+  refine Machine.wp_of_pc hpc ?_
+  unfold swap
+  instr .ldr .X2 .X0 0 at 0x2000
+  simp [hp, hv]
+  instr .ldr .X3 .X1 0 at 0x2004
+  simp [hq, hw]
+  instr .str .X3 .X0 0 at 0x2008
+  simp [hp, hv]
+  instr .str .X2 .X1 0 at 0x200c
+  simp [hq, hw]
   exact .done (by grind)
 
 /-! ## Tests: `instr` rejects a wrong instruction or a wrong address -/
 
 /--
-error: instr: the instruction at the given address is not the given one
-case refine_2
-s : State
-hpc : s.pc = 8192
-⊢ Program.ofList 8192
+error: Tactic `decide` proved that the proposition
+  Program.ofList 8192
       [Instr.ldr Reg.X2 Reg.X0 0, Instr.ldr Reg.X3 Reg.X1 0, Instr.str Reg.X3 Reg.X0 0, Instr.str Reg.X2 Reg.X1 0]
       8192 =
     some (Instr.ldr Reg.X2 Reg.X1 0)
+is false
 -/
 #guard_msgs in
 example (s : State) (hpc : s.pc = 0x2000) : Machine.wp swap (fun _ => True) s := by
-  unfold Machine.wp swap
+  refine Machine.wp_of_pc hpc ?_
+  unfold swap
   instr .ldr .X2 .X1 0 at 0x2000
 
 /--
-error: instr: the current pc is not the given address
+error: Tactic `rfl` failed: The left-hand side
+  (s.setPc 8192).pc
+is not definitionally equal to the right-hand side
+  8196
+
 case refine_1
 s : State
 hpc : s.pc = 8192
-⊢ s.pc = 8196
+⊢ (s.setPc 8192).pc = 8196
 -/
 #guard_msgs in
 example (s : State) (hpc : s.pc = 0x2000) : Machine.wp swap (fun _ => True) s := by
-  unfold Machine.wp swap
+  refine Machine.wp_of_pc hpc ?_
+  unfold swap
   instr .ldr .X2 .X0 0 at 0x2004
 
 end ToySys
