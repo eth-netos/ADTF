@@ -1,16 +1,16 @@
 /-!
-# A toy Arm-like ISA
+# A toy Arm-like instruction set architecture (ISA)
 
 A massively simplified version of the AArch64 syntax and semantics of Kraken
 (`Kraken/AArch64/Syntax.lean` and `Kraken/AArch64/Semantics.lean`).
 
-Simplifications compared to Kraken:
-* Only 64-bit registers and 64-bit operations, so nothing is parameterized by a bit width.
-* A single flat `Instr` type.
-* No stack pointer and no zero register.
+How it differs from Kraken:
+* All registers and operations are 64 bits wide, so nothing is parameterized by a bit width.
+* There is a single flat `Instr` type.
+* There is neither a stack pointer nor a zero register.
 * Memory is a partial map from addresses to whole 64-bit words instead of bytes.
-* No `Effects` type: the semantics of an instruction (`Instr.interp`) directly says which
-  postconditions it guarantees, in omnisemantics style.
+* The semantics of an instruction (`Instr.interp`) directly says which postconditions it
+  guarantees, in omnisemantics style, without an intermediate type that describes its effects.
 
 The level of abstraction is that of a disassembled `.o` file: the state has a program counter, a
 program is a map from addresses to instructions, every instruction occupies 4 bytes, and branches
@@ -31,7 +31,7 @@ For a function `f`:
   `Word` standing for that address, introduced by `generalize syms "f" = f at *`. It then reads
   like a label: `f + 8` is the address of the third instruction of `f`.
 
-Nothing outside of core Lean is used.
+This file depends only on core Lean.
 -/
 
 namespace ToySys
@@ -48,24 +48,28 @@ inductive Reg
   | X30
   deriving DecidableEq, Repr
 
-/-- The registers that a function may overwrite according to the Arm ABI (AAPCS64): arguments and
-results (`X0`-`X7`), the indirect result register (`X8`), temporaries (`X9`-`X15`) and the
+/-- The registers that a function may overwrite according to Arm's application binary interface
+(ABI), the Procedure Call Standard for the Arm 64-bit Architecture (AAPCS64): arguments and results
+(`X0`-`X7`), the indirect result register (`X8`), temporaries (`X9`-`X15`) and the
 intra-procedure-call scratch registers (`X16`, `X17`). -/
 def Reg.callerSaved : List Reg :=
   [.X0, .X1, .X2, .X3, .X4, .X5, .X6, .X7, .X8, .X9, .X10, .X11, .X12, .X13, .X14, .X15, .X16, .X17]
 
-/-- The registers that a function must preserve according to the Arm ABI (AAPCS64): `X19`-`X28` and
-the frame pointer `X29`. The platform register `X18` and the link register `X30` are in neither
-list. -/
+/-- The registers that a function must preserve according to the Procedure Call Standard for the
+Arm 64-bit Architecture (AAPCS64): `X19`-`X28` and the frame pointer `X29`. The platform register
+`X18` and the link register `X30` are neither caller-saved nor callee-saved. -/
 def Reg.calleeSaved : List Reg :=
   [.X19, .X20, .X21, .X22, .X23, .X24, .X25, .X26, .X27, .X28, .X29]
 
-/-- The second operand of most instructions is a register or an immediate. -/
+/-- The last source operand of most instructions. -/
 inductive Operand
+  /-- The value of register `r`. -/
   | reg (r : Reg)
+  /-- The immediate value `v`, a constant that is part of the instruction. -/
   | imm (v : Word)
   deriving DecidableEq, Repr
 
+/-- The condition codes: predicates on the flags. -/
 inductive Cond
   /-- Equal: after `cmp a b`, holds if `a = b`. -/
   | EQ
@@ -89,34 +93,41 @@ inductive Cond
   | LE
   deriving DecidableEq, Repr
 
+/-- The instructions. In their arguments, `dst` is the destination register, `src` a source, and
+`off` an offset. -/
 inductive Instr
+  /-- Move: `dst := src`. -/
   | mov (dst : Reg) (src : Operand)
+  /-- `dst := src1 + src2`. -/
   | add (dst src1 : Reg) (src2 : Operand)
+  /-- Subtract: `dst := src1 - src2`. -/
   | sub (dst src1 : Reg) (src2 : Operand)
+  /-- Multiply: `dst := src1 * src2`. -/
   | mul (dst src1 src2 : Reg)
+  /-- Bitwise and: `dst := src1 &&& src2`. -/
   | and (dst src1 : Reg) (src2 : Operand)
-  /-- Sets the flags according to `src1 - src2`. -/
+  /-- Compare: sets the flags according to `src1 - src2`. -/
   | cmp (src1 : Reg) (src2 : Operand)
-  /-- `dst := if cond then src1 else src2`. -/
+  /-- Conditional select: `dst := if cond then src1 else src2`. -/
   | csel (dst src1 src2 : Reg) (cond : Cond)
-  /-- Loads the word at address `base + off`. -/
+  /-- Load register: reads the word at address `base + off` into `dst`. -/
   | ldr (dst base : Reg) (off : Word)
-  /-- Stores a word at address `base + off`. -/
+  /-- Store register: writes `src` to the word at address `base + off`. -/
   | str (src base : Reg) (off : Word)
-  /-- Branches to the address of this instruction plus `off`. -/
+  /-- Branch: jumps to the address of this instruction plus `off`. -/
   | b (off : Word)
-  /-- Branches by `off` if `cond` holds. -/
+  /-- Branch conditionally: branches by `off` if `cond` holds. -/
   | bcond (cond : Cond) (off : Word)
-  /-- Branches by `off` if `r` is zero. -/
+  /-- Compare and branch on zero: branches by `off` if `r` is zero. -/
   | cbz (r : Reg) (off : Word)
-  /-- Branches by `off` if `r` is not zero. -/
+  /-- Compare and branch on nonzero: branches by `off` if `r` is not zero. -/
   | cbnz (r : Reg) (off : Word)
-  /-- Calls the function named `target`: sets `X30` to the address of the following instruction and
-  jumps to the address of `target`. -/
+  /-- Branch with link: calls the function named `target`, by setting `X30` to the address of the
+  following instruction and jumping to the address of `target`. -/
   | bl (target : String)
-  /-- Returns to the address in `r`, which normally is `X30`. -/
+  /-- Return: jumps to the address in `r`, which normally is `X30`. -/
   | ret (r : Reg)
-  /-- Permanently undefined instruction: executing it is always an error. -/
+  /-- Permanently undefined: executing it is always an error. -/
   | udf
   deriving DecidableEq, Repr
 
@@ -124,39 +135,51 @@ inductive Instr
 error. -/
 abbrev Program := Word → Option Instr
 
-/-- A symbol table maps function names to addresses. -/
+/-- A symbol table, usually called `syms`, maps function names to addresses. -/
 abbrev Symbols := String → Word
 
 /-- The code `code` is loaded at address `f`: the instruction with index `n` is at address
-`f + 4 * n`. For a function named `"f"`, the address is `syms "f"`. -/
+`f + 4 * n`. For a function named `"f"`, the address is `syms "f"`. The definition is phrased in
+terms of the byte offset `off = 4 * n` because that is what appears in addresses. -/
 def Loaded (prog : Program) (f : Word) (code : List Instr) : Prop :=
-  ∀ (n : Nat) (i : Instr), code[n]? = some i → prog (f + BitVec.ofNat 64 (4 * n)) = some i
+  ∀ (off : Word) (i : Instr), code[off.toNat / 4]? = some i → off.toNat % 4 = 0 →
+    prog (f + off) = some i
 
 /-! ## Machine state -/
 
+/-- The condition flags, which `cmp` sets and `Cond` reads. -/
 structure Flags where
+  /-- Negative: the result, read as a signed number, is negative. -/
   n : Bool := false
+  /-- Zero: the result is zero. -/
   z : Bool := false
+  /-- Carry: the unsigned operation carried out of the top bit. -/
   c : Bool := false
+  /-- Overflow: the signed operation overflowed. -/
   v : Bool := false
   deriving DecidableEq, Repr
 
-/-- Addresses name whole words; unmapped addresses must not be accessed. -/
+/-- The memory. Addresses name whole words; unmapped addresses must not be accessed. -/
 abbrev Mem := Word → Option Word
 
 structure State where
+  /-- The values of the registers. -/
   regs : Reg → Word
   flags : Flags
+  /-- The memory. -/
   mem : Mem
-  /-- The address of the instruction that is executed next. -/
+  /-- The program counter: the address of the instruction that is executed next. -/
   pc : Word
 
+/-- Sets register `r` to `v`. -/
 def State.setReg (s : State) (r : Reg) (v : Word) : State :=
   { s with regs := fun r' => if r' = r then v else s.regs r' }
 
+/-- Sets the memory word at address `a`, mapped or not, to `v`. -/
 def State.setMem (s : State) (a : Word) (v : Word) : State :=
   { s with mem := fun a' => if a' = a then some v else s.mem a' }
 
+/-- Sets the program counter to `a`. -/
 def State.setPc (s : State) (a : Word) : State :=
   { s with pc := a }
 
@@ -166,16 +189,17 @@ def State.next (s : State) : State := s.setPc (s.pc + 4)
 /-- Moves the program counter by `off`, relative to the current instruction. -/
 def State.branch (s : State) (off : Word) : State := s.setPc (s.pc + off)
 
+/-- Evaluates an operand to its value in state `s`. -/
 def Operand.eval (o : Operand) (s : State) : Word := match o with
   | .reg r => s.regs r
   | .imm v => v
 
-/-- The flags set by comparing `a` to `b`, i.e. by computing `a - b`. -/
+/-- The flags set by comparing `a` to `b`, i.e. by the subtraction `a - b`. -/
 def Flags.ofSub (a b : Word) : Flags :=
   let res := a - b
   { n := res.msb
     z := res == 0
-    c := decide (b ≤ a) -- no unsigned borrow
+    c := decide (b ≤ a) -- for a subtraction, carry means that there is no unsigned borrow
     v := decide (res.toInt ≠ a.toInt - b.toInt) }
 
 def Cond.holds (c : Cond) (f : Flags) : Bool := match c with
@@ -192,9 +216,9 @@ def Cond.holds (c : Cond) (f : Flags) : Bool := match c with
 
 /-! ## Semantics -/
 
-/-- Omnisemantics of a single instruction: `i.interp s post` holds if executing `i` in state `s`
-is safe and leads to a state satisfying `post`. `s.pc` is the address of `i`, and the resulting
-state's `pc` is the address of the instruction to execute next. -/
+/-- Interprets a single instruction, in omnisemantics style: `i.interp syms s post` holds if
+executing `i` in state `s` is safe and leads to a state satisfying `post`. `s.pc` is the address of
+`i`, and the resulting state's `pc` is the address of the instruction to execute next. -/
 def Instr.interp (syms : Symbols) (i : Instr) (s : State) (post : State → Prop) : Prop :=
   match i with
   | .mov dst src => post (s.setReg dst (src.eval s)).next
@@ -239,16 +263,16 @@ inductive eventually {σ : Type} (step : σ → (σ → Prop) → Prop) (post : 
       (∀ s', mid s' → eventually step post s') →
       eventually step post s
 
-/-- To show that `post` is eventually reached, take one step and show that `post` is eventually
-reached from wherever that step leads. Unlike the `step` constructor, this needs no intermediate
-postcondition. -/
+/-- `eventually` in continuation-passing style (CPS): to show that `post` is eventually reached,
+take one step and show that `post` is eventually reached from wherever that step leads. Unlike the
+`step` constructor, this needs no intermediate postcondition. -/
 theorem eventually_cps {σ : Type} {step : σ → (σ → Prop) → Prop} {post : σ → Prop} {s : σ}
     (h : step s (eventually step post)) : eventually step post s :=
   .step _ h (fun _ h => h)
 
-/-- Sequential composition: if `mid` is eventually reached, and `post` is eventually reached from
-every state satisfying `mid`, then `post` is eventually reached. This is how the correctness
-theorem of a callee is used in the proof of its caller. -/
+/-- Transitivity of `eventually`, i.e. sequential composition: if `mid` is eventually reached, and
+`post` is eventually reached from every state satisfying `mid`, then `post` is eventually reached.
+This is how the correctness theorem of a callee is used in the proof of its caller. -/
 theorem eventually_trans {σ : Type} {step : σ → (σ → Prop) → Prop} {mid post : σ → Prop} {s : σ}
     (h : eventually step mid s) (hk : ∀ s', mid s' → eventually step post s') :
     eventually step post s := by
@@ -256,9 +280,9 @@ theorem eventually_trans {σ : Type} {step : σ → (σ → Prop) → Prop} {mid
   | done h => exact hk _ h
   | step mid' hstep _ ih => exact .step mid' hstep ih
 
-/-- `Machine.wp syms prog post s` holds if running `prog` from state `s` is safe and eventually
-reaches a state satisfying `post`. The program does not determine where execution ends; `post` does,
-typically by constraining the final `pc`. -/
+/-- The weakest precondition (wp) of `post`: `Machine.wp syms prog post s` holds if running `prog`
+from state `s` is safe and eventually reaches a state satisfying `post`. The program does not
+determine where execution ends; `post` does, typically by constraining the final `pc`. -/
 def Machine.wp (syms : Symbols) (prog : Program) (post : State → Prop) (s : State) : Prop :=
   eventually (Machine.step syms prog) post s
 
@@ -268,19 +292,23 @@ section
 variable {syms : Symbols} {prog : Program} {f : Word} {code : List Instr}
   {i : Instr} {s : State} {post : State → Prop}
 
-/-- Fetches the instruction at byte offset `off` of a loaded function. -/
-theorem Loaded.fetch (h : Loaded prog f code) (off : Nat)
-    (hi : code[off / 4]? = some i) (hoff : 4 * (off / 4) = off) :
-    prog (f + BitVec.ofNat 64 off) = some i := by
-  have := h _ _ hi
-  rwa [hoff] at this
+/-- `SplitAddress a f off` holds if `a = f + off`. Its purpose is to let instance resolution compute
+the address `f` of a function and a byte offset `off` from the shape of an address `a` inside that
+function: an address of the form `f + off` is split at the `+`, and an address of any other form is
+taken to be the address of the function itself. -/
+class SplitAddress (a : Word) (f off : outParam Word) : Prop where
+  eq : a = f + off
 
-/-- Fetches the first instruction of a loaded function. -/
-theorem Loaded.fetch_zero (h : Loaded prog f code) (hi : code[0]? = some i) :
-    prog f = some i := by
-  simpa using h 0 i hi
+instance (priority := low) SplitAddress.start (f : Word) : SplitAddress f f 0 := ⟨by simp⟩
 
-/-- Splits one machine step into determining the `pc`, fetching, and executing a given
+instance SplitAddress.offset (f off : Word) : SplitAddress (f + off) f off := ⟨rfl⟩
+
+/-- Fetches the instruction at address `a`, which has to be inside the code loaded at `f`. -/
+theorem Loaded.fetch {a off : Word} (h : Loaded prog f code) [inst : SplitAddress a f off]
+    (hi : code[off.toNat / 4]? = some i) (hoff : off.toNat % 4 = 0) : prog a = some i :=
+  inst.eq ▸ h off i hi hoff
+
+/-- Splits one machine step into determining the program counter, fetching, and executing a given
 instruction. The instruction is executed in `s.setPc a`, which equals `s`, so that the address
 arithmetic of the instruction happens on `a` instead of on `s.pc`. -/
 theorem Machine.step_of_fetch (i : Instr) (a : Word) (hpc : s.pc = a) (hfetch : prog a = some i)
@@ -289,9 +317,9 @@ theorem Machine.step_of_fetch (i : Instr) (a : Word) (hpc : s.pc = a) (hfetch : 
   simp only [Machine.step, hfetch]
   exact h
 
-/-- Starts or resumes stepping through a program: turns a goal about a state whose `pc` is known to
-be `a` into an `eventually` goal about a state whose `pc` is syntactically `a`, which is the form
-that `instr` expects. -/
+/-- Starts or resumes stepping through a program: turns a weakest-precondition (wp) goal about a
+state whose program counter (pc) is known to be `a` into an `eventually` goal about a state whose
+`pc` is syntactically `a`, which is the form that `instr` expects. -/
 theorem Machine.wp_of_pc {a : Word} (hpc : s.pc = a)
     (h : eventually (Machine.step syms prog) post (s.setPc a)) : Machine.wp syms prog post s := by
   subst hpc
@@ -299,60 +327,54 @@ theorem Machine.wp_of_pc {a : Word} (hpc : s.pc = a)
 
 end
 
-/-- Proves a goal of the form `if c then p else q`, as arises from a conditional branch. -/
+/-- Introduction rule for if-then-else (ite): proves a goal of the form `if c then p else q`, as
+arises from a conditional branch. -/
 theorem ite_intro {c p q : Prop} [Decidable c] (ht : c → p) (hf : ¬c → q) : if c then p else q := by
   split
   · next h => exact ht h
   · next h => exact hf h
 
-/-- The part of `instr` that is the same for all instructions. -/
+/-- The part of `instr` that is the same for all instructions: one step that leaves the goal
+produced by `Instr.interp`. -/
 syntax "instr_step " term " at " term : tactic
 
 macro_rules
-  | `(tactic| instr_step $i at $f + $off) => `(tactic| (
-    refine eventually_cps (Machine.step_of_fetch $i ($f + $off) ?_
-      (Loaded.fetch (f := $f) (by assumption) $off ?_ ?_) ?_)
-    -- the current pc is `f + off`
+  | `(tactic| instr_step $i at $a) => `(tactic| (
+    refine eventually_cps (Machine.step_of_fetch $i $a ?_ (Loaded.fetch (by assumption) ?_ ?_) ?_)
+    -- The current pc is `a`.
     rfl
-    -- the instruction at byte offset `off` of the code loaded at `f` is `i`
+    -- With `a` split into `f + off`, the instruction at byte offset `off` of the code is `i`,
     rfl
-    -- `off` is a multiple of 4
+    -- and `off` is a multiple of 4.
     rfl
-    -- execute `i`
-    simp [Instr.interp, State.next, State.branch, State.setPc, State.setReg, State.setMem,
-      Operand.eval, BitVec.add_assoc]))
-  | `(tactic| instr_step $i at $f) => `(tactic| (
-    refine eventually_cps (Machine.step_of_fetch $i $f ?_
-      (Loaded.fetch_zero (f := $f) (by assumption) ?_) ?_)
-    -- the current pc is `f`
-    rfl
-    -- the first instruction of the code loaded at `f` is `i`
-    rfl
-    -- execute `i`
+    -- `BitVec.add_assoc` turns the next pc into the form `f + off` again.
     simp [Instr.interp, State.next, State.branch, State.setPc, State.setReg, State.setMem,
       Operand.eval, BitVec.add_assoc]))
 
-/-- `instr i at f + off` (or `instr i at f` for the first instruction of `f`) symbolically executes
-one instruction of a goal `eventually (Machine.step syms prog) post s`. It applies `eventually_cps`,
-checks by `rfl` that the current `pc` is `f + off`, finds the hypothesis `Loaded prog f code`
-in the context, checks by `rfl` that the instruction at byte offset `off` of `code` is `i`, and
-simplifies through `Instr.interp`.
+/-- `instr i at a` symbolically executes one instruction of a goal
+`eventually (Machine.step syms prog) post s`: it checks that the program counter of `s` is `a` and
+that the instruction at address `a` is `i`, and then simplifies through `Instr.interp`.
 
-Both arguments are redundant, since the `pc` is determined by the state and the instruction by the
-program and the `pc`, but they make proof scripts readable, and unlike comments they are checked.
+Both arguments are redundant, since the program counter is determined by the state and the
+instruction by the program and the program counter. They are there so that a proof script can be
+read next to a disassembly, and `instr` fails if either of them is wrong.
+
+`a` can be any term that is equal to the program counter of `s` by `rfl`. To fetch the instruction,
+`a` is split into the address `f` of a function and an offset by `SplitAddress`, and there has to be
+a hypothesis `Loaded prog f code` in the context.
 
 What is left depends on the instruction, which has to be written as `.name args` for the tactic to
 recognize it:
 * For a conditional branch (`.bcond`, `.cbz`, `.cbnz`) there are two goals, one for the branch being
   taken and one for it not being taken, each with the condition as a premise to introduce.
-* For `.bl "g"` the goal is the `eventually` goal for the state at the entry of `g`, whose `pc` is
-  `syms "g"`. Use `eventually_trans` with `g_ok` to get to the state after the call, and
+* For `.bl "g"` the goal is the `eventually` goal for the state at the entry of `g`, whose program
+  counter is `syms "g"`. Use `eventually_trans` with `g_ok` to get to the state after the call, and
   `Machine.wp_of_pc` to continue from there.
-* For `.ldr` and `.str` the goal still contains the condition that the address is mapped, which is
-  left to the user, e.g. by `simp` with the relevant facts about the memory.
+* For `.ldr` and `.str` the goal still contains the condition that the address is mapped, which can
+  be proved by `simp` with the relevant facts about the memory.
 * For all other instructions the goal is the `eventually` goal for the next state.
 
-No other hypotheses from the context are used. To get started, use `Machine.wp_of_pc`. -/
+To get started, use `Machine.wp_of_pc`. -/
 syntax "instr " term " at " term : tactic
 
 macro_rules
@@ -366,7 +388,7 @@ macro_rules
 
 /-! ## Example: the maximum of three numbers -/
 
-/-- Computes the unsigned maximum of `X0`, `X1` and `X2` into `X0`. -/
+/-- Computes the unsigned maximum of the three registers `X0`, `X1` and `X2` into `X0`. -/
 def max3_code : List Instr := [
   .cmp .X0 (.reg .X1),
   .bcond .HS 8,
@@ -423,7 +445,8 @@ def swap_code : List Instr := [
 ]
 
 /-- Besides swapping, `swap` guarantees that it changes no other memory and no registers other than
-`X2` and `X3`. That is more than the ABI demands, and `swap_swap_ok` relies on it. -/
+`X2` and `X3`. That is more than the calling convention demands, and `swap_swap_ok` relies on
+it. -/
 theorem swap_ok (syms : Symbols) (prog : Program)
     (hswap : Loaded prog (syms "swap") swap_code)
     (p q v w : Word) (s : State) (hpc : s.pc = syms "swap")
@@ -496,7 +519,7 @@ theorem swap_swap_ok (syms : Symbols) (prog : Program)
 
 /--
 error: Tactic `rfl` failed: The left-hand side
-  swap_code[0]?
+  swap_code[BitVec.toNat 0 / 4]?
 is not definitionally equal to the right-hand side
   some (Instr.ldr Reg.X2 Reg.X1 0)
 
@@ -507,7 +530,7 @@ s : State
 swap : Word
 hswap : Loaded prog swap swap_code
 hpc : s.pc = swap
-⊢ swap_code[0]? = some (Instr.ldr Reg.X2 Reg.X1 0)
+⊢ swap_code[BitVec.toNat 0 / 4]? = some (Instr.ldr Reg.X2 Reg.X1 0)
 -/
 #guard_msgs in
 example (syms : Symbols) (prog : Program)
