@@ -1,3 +1,9 @@
+## Code comments
+
+Do not write code comments that just narrate what's already clear from the code. Only add comments to clarify what's not clear immediately.
+Do not write comments that read like a response to a particular prompt. Instead, make sure each comment makes sense on its own.
+If the name of a definition contains an abbreviation, expand the abbreviation in a doc comment.
+
 ## git
 
 Creating a pretty git history is *not* a goal in this project. The goal is to create an *accurate* history that includes everything that was tried, including failed experiments.
