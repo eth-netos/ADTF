@@ -4,6 +4,18 @@ Do not write code comments that just narrate what's already clear from the code.
 Do not write comments that read like a response to a particular prompt. Instead, make sure each comment makes sense on its own.
 If the name of a definition contains an abbreviation, expand the abbreviation in a doc comment.
 
+## Respect decisions from human commits
+
+Before coding, read the output of
+
+```
+git log -n5 --format="%h %an <%ae> %(trailers:key=Co-authored-by,valueonly=true,separator= )"
+```
+
+to see the authors and co-authors of the last five commits.
+If there are commits without any AI co-authors, read these commits using `git show <HASH>`, and treat the changes you see as authoritative design decisions you have to respect.
+If you think that ignoring them would be beneficial, first ask the user.
+
 ## Warnings
 
 When checking the output of build commands, do not only check for success/failure, but also read the warnings. Fix all warnings that have a simple reasonable fix, and tell the user about remaining warnings for which there's no simple fix.
