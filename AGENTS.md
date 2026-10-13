@@ -8,6 +8,10 @@ If the name of a definition contains an abbreviation, expand the abbreviation in
 
 When checking the output of build commands, do not only check for success/failure, but also read the warnings. Fix all warnings that have a simple reasonable fix, and tell the user about remaining warnings for which there's no simple fix.
 
+## Rust
+
+Before committing, run `cargo build --all-targets` and use cargo to run those test files that you think matter for the changes you made.
+
 ## git
 
 Creating a pretty git history is *not* a goal in this project. The goal is to create an *accurate* history that includes everything that was tried, including failed experiments.
