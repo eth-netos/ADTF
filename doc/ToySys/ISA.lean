@@ -11,9 +11,12 @@ How it differs from Kraken:
 * There is a single flat `Instr` type.
 * There is neither a stack pointer nor a zero register.
 * Memory is a partial map from addresses to whole 64-bit words instead of bytes.
-* The semantics of an instruction (`Instr.interp`) directly says which
-  postconditions it guarantees, in omnisemantics style, without an intermediate
-  type that describes its effects.
+* The semantics of an instruction (`Instr.interp`) produces an `Effects` value
+  with fewer kinds of effects: it either finishes in a new state, fails, or
+  loads from or stores to an address outside the core's memory, which the
+  platform handles (e.g. memory-mapped input/output (MMIO)). What the platform
+  does is not defined here: `Platform P` is the interface that a platform with
+  state `P` implements.
 
 The level of abstraction is that of a disassembled `.o` file: the state has a
 program counter, a program is a map from addresses to instructions, every
@@ -160,7 +163,7 @@ def Loaded (prog : Program) (f : Word) (code : List Instr) : Prop :=
   ∀ (i : Nat) (instr : Instr),
     code[i]? = some instr → prog (f + 4 * i) = some instr
 
-/-! ## Machine state -/
+/-! ## Core state -/
 
 /-- The condition flags, which `cmp` sets and `Cond` reads. -/
 structure Flags where
@@ -174,8 +177,8 @@ structure Flags where
   v : Bool := false
   deriving DecidableEq, Repr
 
-/-- The memory. Addresses name whole words; unmapped addresses must not be
-accessed. -/
+/-- The core's memory. Addresses name whole words. Accesses to addresses that
+are not mapped go to the platform. -/
 abbrev Mem := Word → Option Word
 
 structure State where
@@ -228,17 +231,33 @@ def Cond.holds (c : Cond) (f : Flags) : Bool := match c with
 
 /-! ## Semantics -/
 
-/-- Interprets a single instruction, in omnisemantics style: `i.interp syms s
-next jmp` holds if executing `i` in state `s`, where `s.pc` is the address of
-`i`, is safe and either
-* falls through to the following instruction, in a state satisfying `next`, or
-* jumps (`jmp`) to an address `a`, in a state satisfying `jmp a`.
+/-- What executing an instruction does, as a tree whose leaves are the possible
+outcomes. Adapted from `Effects` of Kraken (`Kraken/AArch64/Semantics.lean`),
+with only the kinds of effects needed here. Unlike in Kraken, loads and stores
+outside the core's memory cannot change the core's memory, because the memory
+that the platform owns is part of the platform's state. -/
+inductive Effects where
+  /-- The instruction finished, in state `s`. -/
+  | done (s : State)
+  /-- Executing the instruction is an error. -/
+  | error (msg : String)
+  /-- A load from address `addr`, which is not in the core's memory, so that
+  the platform answers it. `ret` continues with the value loaded. -/
+  | nonmem_load (addr : Word) (ret : Word -> Effects)
+  /-- A store of `v` to address `addr`, which is not in the core's memory, so
+  that the platform handles it. `ret` continues afterwards. -/
+  | nonmem_store (addr : Word) (v : Word) (ret : Effects)
+
+/-- Interprets a single instruction: `i.interp syms s next jmp` executes `i` in
+state `s`, where `s.pc` is the address of `i`, and either
+* falls through to the following instruction, continuing with `next`, or
+* jumps (`jmp`) to an address `a`, continuing with `jmp a`.
 
 The instruction only decides between the two and computes the target of a jump.
 It does not update the program counter: the states passed to `next` and `jmp`
 still have the `pc` of `s`. -/
 def Instr.interp (syms : Symbols) (i : Instr) (s : State)
-    (next : State → Prop) (jmp : Word → State → Prop) : Prop :=
+    (next : State -> Effects) (jmp : Word -> State -> Effects) : Effects :=
   match i with
   | .mov dst src => next (s.setReg dst (src.eval s))
   | .add dst src1 src2 => next (s.setReg dst (s.regs src1 + src2.eval s))
@@ -251,30 +270,69 @@ def Instr.interp (syms : Symbols) (i : Instr) (s : State)
     next (s.setReg dst
       (if cond.holds s.flags then s.regs src1 else s.regs src2))
   | .ldr dst base off =>
-    ∃ v, s.mem (s.regs base + off) = some v ∧ next (s.setReg dst v)
+    match s.mem (s.regs base + off) with
+    | some v => next (s.setReg dst v)
+    | none => .nonmem_load (s.regs base + off) (fun v => next (s.setReg dst v))
   | .str src base off =>
-    (s.mem (s.regs base + off)).isSome ∧
-      next (s.setMem (s.regs base + off) (s.regs src))
+    match s.mem (s.regs base + off) with
+    | some _ => next (s.setMem (s.regs base + off) (s.regs src))
+    | none => .nonmem_store (s.regs base + off) (s.regs src) (next s)
   | .b off => jmp (s.pc + off) s
   | .bcond cond off => if cond.holds s.flags then jmp (s.pc + off) s else next s
   | .cbz r off => if s.regs r = 0 then jmp (s.pc + off) s else next s
   | .cbnz r off => if s.regs r ≠ 0 then jmp (s.pc + off) s else next s
   | .bl target => jmp (syms target) (s.setReg .X30 (s.pc + 4))
   | .ret r => jmp (s.regs r) s
-  | .udf => False
+  | .udf => .error "udf"
 
-/-- One step of the machine: fetches the instruction at the program counter,
+/-- One step of the core: fetches the instruction at the program counter,
 executes it, and updates the program counter, to the following instruction if
 the instruction fell through and to the target if it jumped. If there is no
-instruction at the program counter, the machine is stuck, which is an error. -/
-def Machine.step (syms : Symbols) (prog : Program) (s : State)
-    (post : State → Prop) : Prop :=
+instruction at the program counter, the core is stuck, which is an error. -/
+def Core.step (syms : Symbols) (prog : Program) (s : State) : Effects :=
   match prog s.pc with
   | some i =>
     i.interp syms s
-      (fun s' => post (s'.setPc (s.pc + 4)))
-      (fun a s' => post (s'.setPc a))
-  | none => False
+      (fun s' => .done (s'.setPc (s.pc + 4)))
+      (fun a s' => .done (s'.setPc a))
+  | none => .error "no instruction at the program counter"
+
+/-- What a platform with state `P` does with the loads and stores of a core
+that are not in the core's memory, in omnisemantics style:
+* `load a p post` holds if a load from address `a` in platform state `p` is safe
+  and answers a value `v` and leaves a state `p'` such that `post v p'`,
+* `store a v p post` holds if a store of `v` to address `a` in platform state
+  `p` is safe and leaves a state `p'` such that `post p'`. -/
+structure Platform (P : Type) where
+  load : Word -> P -> (Word -> P -> Prop) -> Prop
+  store : Word -> Word -> P -> (P -> Prop) -> Prop
+
+/-- The weakest precondition (wp) of effects on a platform: `e.wp pl post p`
+holds if the effects `e` are safe on platform `pl` in platform state `p`, and
+lead to a core state `s` and platform state `p'` such that `post s p'`. -/
+@[simp] def Effects.wp {P : Type} (pl : Platform P)
+    (post : State -> P -> Prop) : Effects -> P -> Prop
+  | .done s, p => post s p
+  | .error _, _ => False
+  | .nonmem_load a ret, p => pl.load a p (fun v p' => (ret v).wp pl post p')
+  | .nonmem_store a v ret, p => pl.store a v p (fun p' => ret.wp pl post p')
+
+/-- Pushes `Effects.wp` into the branches of an `if`, as arises from a conditional
+branch, so that `ite_intro` applies. -/
+theorem Effects.wp_ite {P : Type} {pl : Platform P}
+    {post : State -> P -> Prop} {p : P} {c : Prop} [Decidable c]
+    (a b : Effects) :
+    (if c then a else b).wp pl post p =
+      if c then a.wp pl post p else b.wp pl post p := by
+  split <;> rfl
+
+/-- One step of the core on platform `pl`, in omnisemantics style, on the state
+of both: `Core.stepWp pl syms prog (s, p) post` holds if a step of the core in
+state `s`, with the platform in state `p`, is safe and leads to states that
+satisfy `post`. -/
+def Core.stepWp {P : Type} (pl : Platform P) (syms : Symbols) (prog : Program)
+    (sp : Prod State P) (post : Prod State P -> Prop) : Prop :=
+  (Core.step syms prog sp.1).wp pl (fun s p => post (s, p)) sp.2
 
 /-! ## Omnisemantics for any number of steps -/
 
@@ -315,13 +373,14 @@ theorem eventually_trans {σ : Type} {step : σ → (σ → Prop) → Prop}
   | done h => exact hk _ h
   | step mid' hstep _ ih => exact .step mid' hstep ih
 
-/-- The weakest precondition (wp) of `post`: `Machine.wp syms prog post s` holds
-if running `prog` from state `s` is safe and eventually reaches a state
-satisfying `post`. The program does not determine where execution ends; `post`
-does, typically by constraining the final `pc`. -/
-def Machine.wp (syms : Symbols) (prog : Program) (post : State → Prop)
-    (s : State) : Prop :=
-  eventually (Machine.step syms prog) post s
+/-- The weakest precondition (wp) of `post`: `Core.wp pl syms prog post (s, p)`
+holds if running `prog` on platform `pl`, from core state `s` and platform state
+`p`, is safe and eventually reaches states satisfying `post`. The program does
+not determine where execution ends; `post` does, typically by constraining the
+final `pc`. -/
+def Core.wp {P : Type} (pl : Platform P) (syms : Symbols) (prog : Program)
+    (post : Prod State P -> Prop) (sp : Prod State P) : Prop :=
+  eventually (Core.stepWp pl syms prog) post sp
 
 /-! ## Stepping through a program -/
 
@@ -352,25 +411,26 @@ theorem Loaded.fetch
 executing a given instruction. The instruction is executed in `s.setPc a`, which
 equals `s`, so that the rest of the proof uses the user-provided `a` instead of
 `s.pc`. -/
-theorem Machine.step_of_fetch {syms : Symbols} {prog : Program} {s : State}
-    {post : State → Prop}
+theorem Core.step_of_fetch {P : Type} {pl : Platform P} {syms : Symbols}
+    {prog : Program} {s : State} {p : P} {post : Prod State P -> Prop}
     (i : Instr) (a : Word) (hpc : s.pc = a) (hfetch : prog a = some i)
-    (h : i.interp syms (s.setPc a)
-      (fun s' => post (s'.setPc (a + 4)))
-      (fun a' s' => post (s'.setPc a'))) :
-    Machine.step syms prog s post := by
+    (h : (i.interp syms (s.setPc a)
+      (fun s' => .done (s'.setPc (a + 4)))
+      (fun a' s' => .done (s'.setPc a'))).wp pl (fun s' p' => post (s', p')) p) :
+    Core.stepWp pl syms prog (s, p) post := by
   subst hpc
-  simp only [Machine.step, hfetch]
+  simp only [Core.stepWp, Core.step, hfetch]
   exact h
 
 /-- Starts or resumes stepping through a program: turns a weakest-precondition
 (wp) goal about a state whose program counter (pc) is known to be `a` into an
 `eventually` goal about a state whose `pc` is syntactically `a`, which is the
 form that `instr` expects. -/
-theorem Machine.wp_of_pc {syms : Symbols} {prog : Program} {s : State}
-    {post : State → Prop} {a : Word} (hpc : s.pc = a)
-    (h : eventually (Machine.step syms prog) post (s.setPc a)) :
-    Machine.wp syms prog post s := by
+theorem Core.wp_of_pc {P : Type} {pl : Platform P} {syms : Symbols}
+    {prog : Program} {sp : Prod State P} {post : Prod State P -> Prop} {a : Word}
+    (hpc : sp.1.pc = a)
+    (h : eventually (Core.stepWp pl syms prog) post (sp.1.setPc a, sp.2)) :
+    Core.wp pl syms prog post sp := by
   subst hpc
   exact h
 
@@ -407,7 +467,7 @@ macro "dsimp_proj" : tactic =>
 
 macro_rules
   | `(tactic| instr_step $i at $a) => `(tactic| (
-    refine eventually_cps (Machine.step_of_fetch $i $a ?_
+    refine eventually_cps (Core.step_of_fetch $i $a ?_
       (Loaded.fetch (by assumption) ?_ ?_) ?_)
     -- The current pc as computed by the proof equals the user-provided
     -- instruction address `a`
@@ -421,14 +481,17 @@ macro_rules
     bv_decide
     -- The instruction at byte offset `a - base` of the code is `i`
     ring_simplify; (try simp); rfl
-    -- simplify remainder of proof
-    simp [Instr.interp, State.setPc, State.setReg, State.setMem,
-        Operand.eval]))
+    -- What remains is the effects of `i`
+    simp only [Instr.interp]))
+
+/-- Simplifies the effects of an instruction, as left by `instr_step`. -/
+macro "instr_simp" : tactic => `(tactic|
+  simp [Effects.wp, State.setPc, State.setReg, State.setMem, Operand.eval])
 
 /-- `instr i at a` symbolically executes one instruction of a goal `eventually
-(Machine.step syms prog) post s`: it checks that the program counter of `s` is
-`a` and that the instruction at address `a` is `i`, and then simplifies through
-`Instr.interp`.
+(Core.stepWp pl syms prog) post (s, p)`: it checks that the program counter of
+`s` is `a` and that the instruction at address `a` is `i`, and then simplifies
+through `Instr.interp` and `Effects.wp`.
 
 Both arguments are redundant, since the program counter is determined by the
 state and the instruction by the program and the program counter. They are there
@@ -447,25 +510,32 @@ for the tactic to recognize it:
   condition as a premise to introduce.
 * For `.bl "g"` the goal is the `eventually` goal for the state at the entry of
   `g`, whose program counter is `syms "g"`. Use `eventually_trans` with `g_ok`
-  to get to the state after the call, and `Machine.wp_of_pc` to continue from
+  to get to the state after the call, and `Core.wp_of_pc` to continue from
   there.
-* For `.ldr` and `.str` the goal still contains the condition that the address
-  is mapped, which can be proved by `simp` with the relevant facts about the
-  memory.
+* For `.ldr` and `.str` the goal still contains a match on whether the address
+  is in the core's memory, which can be simplified by `simp` with the relevant
+  facts about the memory.
 * For all other instructions the goal is the `eventually` goal for the next
   state.
 
-To get started, use `Machine.wp_of_pc`. -/
+To get started, use `Core.wp_of_pc`. -/
 syntax "instr " term " at " term : tactic
 
+-- For a conditional branch, `Effects.wp` is pushed into the two branches before
+-- anything else is simplified: simplifying the condition first would leave the
+-- `Decidable` instance of the `if` behind, which `Effects.wp_ite` then cannot
+-- match.
 macro_rules
   | `(tactic| instr .bcond $c $off at $a) =>
-    `(tactic| (instr_step .bcond $c $off at $a; refine ite_intro ?_ ?_))
+    `(tactic| (instr_step .bcond $c $off at $a; simp only [Effects.wp_ite];
+               refine ite_intro ?_ ?_ <;> instr_simp))
   | `(tactic| instr .cbz $r $off at $a) =>
-    `(tactic| (instr_step .cbz $r $off at $a; refine ite_intro ?_ ?_))
+    `(tactic| (instr_step .cbz $r $off at $a; simp only [Effects.wp_ite];
+               refine ite_intro ?_ ?_ <;> instr_simp))
   | `(tactic| instr .cbnz $r $off at $a) =>
-    `(tactic| (instr_step .cbnz $r $off at $a; refine ite_intro ?_ ?_))
-  | `(tactic| instr $i at $a) => `(tactic| instr_step $i at $a)
+    `(tactic| (instr_step .cbnz $r $off at $a; simp only [Effects.wp_ite];
+               refine ite_intro ?_ ?_ <;> instr_simp))
+  | `(tactic| instr $i at $a) => `(tactic| (instr_step $i at $a; instr_simp))
 
 /-! ## Example: the maximum of three numbers -/
 
@@ -481,16 +551,16 @@ def max3_code : List Instr := [
   .ret .X30
 ]
 
-theorem max3_ok (syms : Symbols) (prog : Program)
+theorem max3_ok {P : Type} (pl : Platform P) (syms : Symbols) (prog : Program)
     (hmax3 : Loaded prog (syms "max3") max3_code)
-    (a b c : Word) (s : State) (hpc : s.pc = syms "max3")
+    (a b c : Word) (s : State) (ps : P) (hpc : s.pc = syms "max3")
     (ha : s.regs .X0 = a) (hb : s.regs .X1 = b) (hc : s.regs .X2 = c) :
-    Machine.wp syms prog
-      (fun s' => s'.pc = s.regs .X30 ∧
-        (s'.regs .X0 = a ∨ s'.regs .X0 = b ∨ s'.regs .X0 = c) ∧
-        a ≤ s'.regs .X0 ∧ b ≤ s'.regs .X0 ∧ c ≤ s'.regs .X0) s := by
+    Core.wp pl syms prog
+      (fun sp => sp.1.pc = s.regs .X30 ∧
+        (sp.1.regs .X0 = a ∨ sp.1.regs .X0 = b ∨ sp.1.regs .X0 = c) ∧
+        a ≤ sp.1.regs .X0 ∧ b ≤ sp.1.regs .X0 ∧ c ≤ sp.1.regs .X0) (s, ps) := by
   generalize syms "max3" = max3 at *
-  refine Machine.wp_of_pc hpc ?_
+  refine Core.wp_of_pc hpc ?_
   instr .cmp .X0 (.reg .X1) at max3
   instr .bcond .HS 8 at max3 + 0x4
   · intro _
@@ -529,19 +599,21 @@ def swap_code : List Instr := [
 
 /-- Besides swapping, `swap` guarantees that it changes no other memory and no
 registers other than `X2` and `X3`. That is more than the calling convention
-demands, and `swap_swap_ok` relies on it. -/
-theorem swap_ok (syms : Symbols) (prog : Program)
+demands, and `swap_swap_ok` relies on it. Both words are in the core's memory,
+so the platform is not involved. -/
+theorem swap_ok {P : Type} (pl : Platform P) (syms : Symbols) (prog : Program)
     (hswap : Loaded prog (syms "swap") swap_code)
-    (p q v w : Word) (s : State) (hpc : s.pc = syms "swap")
+    (p q v w : Word) (s : State) (ps : P) (hpc : s.pc = syms "swap")
     (hp : s.regs .X0 = p) (hq : s.regs .X1 = q) (hpq : p ≠ q)
     (hv : s.mem p = some v) (hw : s.mem q = some w) :
-    Machine.wp syms prog
-      (fun s' => s'.pc = s.regs .X30 ∧
-        s'.mem p = some w ∧ s'.mem q = some v ∧
-        (∀ a, a ≠ p → a ≠ q → s'.mem a = s.mem a) ∧
-        ∀ r, r ≠ .X2 → r ≠ .X3 → s'.regs r = s.regs r) s := by
+    Core.wp pl syms prog
+      (fun sp => sp.1.pc = s.regs .X30 ∧
+        sp.1.mem p = some w ∧ sp.1.mem q = some v ∧
+        (∀ a, a ≠ p → a ≠ q → sp.1.mem a = s.mem a) ∧
+        (∀ r, r ≠ .X2 → r ≠ .X3 → sp.1.regs r = s.regs r) ∧
+        sp.2 = ps) (s, ps) := by
   generalize syms "swap" = swap at *
-  refine Machine.wp_of_pc hpc ?_
+  refine Core.wp_of_pc hpc ?_
   instr .ldr .X2 .X0 0 at swap
   simp [hp, hv]
   instr .ldr .X3 .X1 0 at swap + 0x4
@@ -564,32 +636,33 @@ def swap_swap_code : List Instr := [
   .ret .X9
 ]
 
-theorem swap_swap_ok (syms : Symbols) (prog : Program)
+theorem swap_swap_ok {P : Type} (pl : Platform P) (syms : Symbols)
+    (prog : Program)
     (hswap_swap : Loaded prog (syms "swap_swap") swap_swap_code)
     (hswap : Loaded prog (syms "swap") swap_code)
-    (p q v w : Word) (s : State) (hpc : s.pc = syms "swap_swap")
+    (p q v w : Word) (s : State) (ps : P) (hpc : s.pc = syms "swap_swap")
     (hp : s.regs .X0 = p) (hq : s.regs .X1 = q) (hpq : p ≠ q)
     (hv : s.mem p = some v) (hw : s.mem q = some w) :
-    Machine.wp syms prog
-      (fun s' => s'.pc = s.regs .X30 ∧ s'.mem = s.mem ∧
-        ∀ r ∈ Reg.calleeSaved, s'.regs r = s.regs r) s := by
+    Core.wp pl syms prog
+      (fun sp => sp.1.pc = s.regs .X30 ∧ sp.1.mem = s.mem ∧
+        ∀ r ∈ Reg.calleeSaved, sp.1.regs r = s.regs r) (s, ps) := by
   generalize syms "swap_swap" = swap_swap at *
-  refine Machine.wp_of_pc hpc ?_
+  refine Core.wp_of_pc hpc ?_
   instr .mov .X9 (.reg .X30) at swap_swap
   instr .bl "swap" at swap_swap + 0x4
   refine eventually_trans
-    (swap_ok syms prog hswap p q v w _ rfl (by simp [hp]) (by simp [hq]) hpq hv
-      hw) ?_
-  intro s1 ⟨hpc1, hp1, hq1, hmem1, hregs1⟩
+    (swap_ok pl syms prog hswap p q v w _ _ rfl (by simp [hp]) (by simp [hq])
+      hpq hv hw) ?_
+  intro s1 ⟨hpc1, hp1, hq1, hmem1, hregs1, hps1⟩
   simp at hpc1 hp1 hq1 hmem1 hregs1
-  refine Machine.wp_of_pc hpc1 ?_
+  refine Core.wp_of_pc hpc1 ?_
   instr .bl "swap" at swap_swap + 0x8
   refine eventually_trans
-    (swap_ok syms prog hswap p q w v _ rfl (by simp [hregs1, hp])
+    (swap_ok pl syms prog hswap p q w v _ _ rfl (by simp [hregs1, hp])
       (by simp [hregs1, hq]) hpq hp1 hq1) ?_
-  intro s2 ⟨hpc2, hp2, hq2, hmem2, hregs2⟩
+  intro s2 ⟨hpc2, hp2, hq2, hmem2, hregs2, hps2⟩
   simp at hpc2 hp2 hq2 hmem2 hregs2
-  refine Machine.wp_of_pc hpc2 ?_
+  refine Core.wp_of_pc hpc2 ?_
   instr .ret .X9 at swap_swap + 0xc
   refine .done ⟨?_, ?_, ?_⟩
   · grind
@@ -610,23 +683,23 @@ is not definitionally equal to the right-hand side
   some (Instr.ldr Reg.X2 Reg.X1 0#64)
 -/
 #guard_msgs (substring := true) in
-example (syms : Symbols) (prog : Program)
-    (hswap : Loaded prog (syms "swap") swap_code) (s : State)
+example {P : Type} (pl : Platform P) (syms : Symbols) (prog : Program)
+    (hswap : Loaded prog (syms "swap") swap_code) (s : State) (ps : P)
     (hpc : s.pc = syms "swap") :
-    Machine.wp syms prog (fun _ => True) s := by
+    Core.wp pl syms prog (fun _ => True) (s, ps) := by
   generalize syms "swap" = swap at *
-  refine Machine.wp_of_pc hpc ?_
+  refine Core.wp_of_pc hpc ?_
   instr .ldr .X2 .X1 0 at swap
 
 /-- error: bv_decide can't prove that the user-provided instruction address
 matches the computed pc -/
 #guard_msgs (substring := true) in
-example (syms : Symbols) (prog : Program)
-    (hswap : Loaded prog (syms "swap") swap_code) (s : State)
+example {P : Type} (pl : Platform P) (syms : Symbols) (prog : Program)
+    (hswap : Loaded prog (syms "swap") swap_code) (s : State) (ps : P)
     (hpc : s.pc = syms "swap") :
-    Machine.wp syms prog (fun _ => True) s := by
+    Core.wp pl syms prog (fun _ => True) (s, ps) := by
   generalize syms "swap" = swap at *
-  refine Machine.wp_of_pc hpc ?_
+  refine Core.wp_of_pc hpc ?_
   instr .ldr .X3 .X1 0 at swap + 0x4
 
 end ToySys

@@ -8,4 +8,4 @@ relaxedAutoImplicit = false
 
 [[lean_lib]]
 name = "ToySys"
-roots = ["ISA", "Platform"]
+roots = ["ISA", "MiniIMX93", "System"]
