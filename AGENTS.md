@@ -49,3 +49,7 @@ Do not try to imitate the git commit message format of previous commits. Instead
 * A brief summary of what you did, wrapped at 72 chars 
 * An empty line
 * A Co-authored-by trailer where you credit yourself, including the model name and model version number
+
+### git submodules
+
+Before committing, read `git status` to know what's going on, and pay attention to the submodules. If the changes you are about to commit depend on the contents of submodules, first make the necessary submodule commit(s). Then, in the parent repo, there should be no more "modified content" status, but maybe some "new commits" status for submodules. Also `git add` the submodules with changes relevant for the current commit, so that it is always clear from the git history against what submodule contents the parent's code was tested.
