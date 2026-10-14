@@ -48,6 +48,8 @@ Do not try to imitate the git commit message format of previous commits. Instead
 * An empty line
 * A brief summary of what you did, wrapped at 72 chars 
 * An empty line
+* How many tokens you spent and how much wall-clock time it took
+* An empty line
 * A Co-authored-by trailer where you credit yourself, including the model name and model version number
 
 ### git submodules
