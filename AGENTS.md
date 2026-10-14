@@ -46,7 +46,7 @@ Do not try to imitate the git commit message format of previous commits. Instead
 * An empty line
 * A line `Outcome:`
 * An empty line
-* A brief summary of what you did, wrapped at 72 chars 
+* A brief summary of what you did, wrapped at 72 chars, at most 12 lines long
 * An empty line
 * How many tokens you spent and how much wall-clock time it took
 * An empty line
