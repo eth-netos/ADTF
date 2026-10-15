@@ -10,13 +10,15 @@ How it differs from Kraken:
   a bit width.
 * There is a single flat `Instr` type.
 * There is neither a stack pointer nor a zero register.
-* Memory is a partial map from addresses to whole 64-bit words instead of bytes.
+* The core has no memory of its own. Memory accesses read and write whole 64-bit
+  words, and they all go to the platform, be it to memory or to memory-mapped
+  input/output (MMIO) registers.
 * The semantics of an instruction (`Instr.interp`) produces an `Effects` value
   with fewer kinds of effects: it either finishes in a new state, fails, or
-  loads from or stores to an address outside the core's memory, which the
-  platform handles (e.g. memory-mapped input/output (MMIO)). What the platform
-  does is not defined here: `Platform P` is the interface that a platform with
-  state `P` implements.
+  reads from or writes to memory. What the platform does with memory accesses
+  is not defined here: `Platform P` is the interface that a platform with state
+  `P` implements.
+* Instructions are not fetched from memory but from a separate `Program`.
 
 The level of abstraction is that of a disassembled `.o` file: the state has a
 program counter, a program is a map from addresses to instructions, every
@@ -177,16 +179,10 @@ structure Flags where
   v : Bool := false
   deriving DecidableEq, Repr
 
-/-- The core's memory. Addresses name whole words. Accesses to addresses that
-are not mapped go to the platform. -/
-abbrev Mem := Word → Option Word
-
 structure State where
   /-- The values of the registers. -/
   regs : Reg → Word
   flags : Flags
-  /-- The memory. -/
-  mem : Mem
   /-- The program counter: the address of the instruction that is executed
   next. -/
   pc : Word
@@ -194,10 +190,6 @@ structure State where
 /-- Sets register `r` to `v`. -/
 def State.setReg (s : State) (r : Reg) (v : Word) : State :=
   { s with regs := fun r' => if r' = r then v else s.regs r' }
-
-/-- Sets the memory word at address `a`, mapped or not, to `v`. -/
-def State.setMem (s : State) (a : Word) (v : Word) : State :=
-  { s with mem := fun a' => if a' = a then some v else s.mem a' }
 
 /-- Sets the program counter to `a`. -/
 def State.setPc (s : State) (a : Word) : State :=
@@ -233,20 +225,20 @@ def Cond.holds (c : Cond) (f : Flags) : Bool := match c with
 
 /-- What executing an instruction does, as a tree whose leaves are the possible
 outcomes. Adapted from `Effects` of Kraken (`Kraken/AArch64/Semantics.lean`),
-with only the kinds of effects needed here. Unlike in Kraken, loads and stores
-outside the core's memory cannot change the core's memory, because the memory
-that the platform owns is part of the platform's state. -/
+with only the kinds of effects needed here. Unlike in Kraken, there is one kind
+of read and one kind of write for all memory accesses, because memory belongs to
+the platform. -/
 inductive Effects where
   /-- The instruction finished, in state `s`. -/
   | done (s : State)
   /-- Executing the instruction is an error. -/
   | error (msg : String)
-  /-- A load from address `addr`, which is not in the core's memory, so that
-  the platform answers it. `ret` continues with the value loaded. -/
-  | nonmem_load (addr : Word) (ret : Word -> Effects)
-  /-- A store of `v` to address `addr`, which is not in the core's memory, so
-  that the platform handles it. `ret` continues afterwards. -/
-  | nonmem_store (addr : Word) (v : Word) (ret : Effects)
+  /-- A read of the word at address `addr`, which the platform answers. `ret`
+  continues with the value read. -/
+  | mem_read (addr : Word) (ret : Word -> Effects)
+  /-- A write of `v` to the word at address `addr`, which the platform handles.
+  `ret` continues afterwards. -/
+  | mem_write (addr : Word) (v : Word) (ret : Effects)
 
 /-- Interprets a single instruction: `i.interp syms s next jmp` executes `i` in
 state `s`, where `s.pc` is the address of `i`, and either
@@ -270,13 +262,8 @@ def Instr.interp (syms : Symbols) (i : Instr) (s : State)
     next (s.setReg dst
       (if cond.holds s.flags then s.regs src1 else s.regs src2))
   | .ldr dst base off =>
-    match s.mem (s.regs base + off) with
-    | some v => next (s.setReg dst v)
-    | none => .nonmem_load (s.regs base + off) (fun v => next (s.setReg dst v))
-  | .str src base off =>
-    match s.mem (s.regs base + off) with
-    | some _ => next (s.setMem (s.regs base + off) (s.regs src))
-    | none => .nonmem_store (s.regs base + off) (s.regs src) (next s)
+    .mem_read (s.regs base + off) (fun v => next (s.setReg dst v))
+  | .str src base off => .mem_write (s.regs base + off) (s.regs src) (next s)
   | .b off => jmp (s.pc + off) s
   | .bcond cond off => if cond.holds s.flags then jmp (s.pc + off) s else next s
   | .cbz r off => if s.regs r = 0 then jmp (s.pc + off) s else next s
@@ -297,15 +284,15 @@ def Core.step (syms : Symbols) (prog : Program) (s : State) : Effects :=
       (fun a s' => .done (s'.setPc a))
   | none => .error "no instruction at the program counter"
 
-/-- What a platform with state `P` does with the loads and stores of a core
-that are not in the core's memory, in omnisemantics style:
-* `load a p post` holds if a load from address `a` in platform state `p` is safe
+/-- What a platform with state `P` does with the memory accesses of a core, in
+omnisemantics style:
+* `read a p post` holds if a read from address `a` in platform state `p` is safe
   and answers a value `v` and leaves a state `p'` such that `post v p'`,
-* `store a v p post` holds if a store of `v` to address `a` in platform state
+* `write a v p post` holds if a write of `v` to address `a` in platform state
   `p` is safe and leaves a state `p'` such that `post p'`. -/
 structure Platform (P : Type) where
-  load : Word -> P -> (Word -> P -> Prop) -> Prop
-  store : Word -> Word -> P -> (P -> Prop) -> Prop
+  read : Word -> P -> (Word -> P -> Prop) -> Prop
+  write : Word -> Word -> P -> (P -> Prop) -> Prop
 
 /-- The weakest precondition (wp) of effects on a platform: `e.wp pl post p`
 holds if the effects `e` are safe on platform `pl` in platform state `p`, and
@@ -314,8 +301,8 @@ lead to a core state `s` and platform state `p'` such that `post s p'`. -/
     (post : State -> P -> Prop) : Effects -> P -> Prop
   | .done s, p => post s p
   | .error _, _ => False
-  | .nonmem_load a ret, p => pl.load a p (fun v p' => (ret v).wp pl post p')
-  | .nonmem_store a v ret, p => pl.store a v p (fun p' => ret.wp pl post p')
+  | .mem_read a ret, p => pl.read a p (fun v p' => (ret v).wp pl post p')
+  | .mem_write a v ret, p => pl.write a v p (fun p' => ret.wp pl post p')
 
 /-- Pushes `Effects.wp` into the branches of an `if`, as arises from a conditional
 branch, so that `ite_intro` applies. -/
@@ -486,7 +473,7 @@ macro_rules
 
 /-- Simplifies the effects of an instruction, as left by `instr_step`. -/
 macro "instr_simp" : tactic => `(tactic|
-  simp [Effects.wp, State.setPc, State.setReg, State.setMem, Operand.eval])
+  simp [Effects.wp, State.setPc, State.setReg, Operand.eval])
 
 /-- `instr i at a` symbolically executes one instruction of a goal `eventually
 (Core.stepWp pl syms prog) post (s, p)`: it checks that the program counter of
@@ -512,9 +499,9 @@ for the tactic to recognize it:
   `g`, whose program counter is `syms "g"`. Use `eventually_trans` with `g_ok`
   to get to the state after the call, and `Core.wp_of_pc` to continue from
   there.
-* For `.ldr` and `.str` the goal still contains a match on whether the address
-  is in the core's memory, which can be simplified by `simp` with the relevant
-  facts about the memory.
+* For `.ldr` and `.str` the goal is what the platform's `read` or `write` says
+  about the access, which can be simplified by `simp` with the relevant facts
+  about the platform.
 * For all other instructions the goal is the `eventually` goal for the next
   state.
 
@@ -585,6 +572,25 @@ theorem max3_ok {P : Type} (pl : Platform P) (syms : Symbols) (prog : Program)
       instr .ret .X30 at max3 + 0x18
       exact .done (by grind [Cond.holds, Flags.ofSub])
 
+/-! ## A platform that is nothing but memory -/
+
+/-- A memory that maps the addresses of some words to their values. -/
+abbrev Mem := Word → Option Word
+
+/-- Sets the word at address `a` of memory `m` to `v`. -/
+def Mem.set (m : Mem) (a v : Word) : Mem :=
+  fun a' => if a' = a then some v else m a'
+
+/-- The platform whose state is a `Mem`. Reading or writing an address that is
+not mapped is an error. -/
+def memPlatform : Platform Mem where
+  read a m post := match m a with
+    | some v => post v m
+    | none => False
+  write a v m post := match m a with
+    | some _ => post (m.set a v)
+    | none => False
+
 /-! ## Example: swapping two words in memory -/
 
 /-- Swaps the words stored at the addresses in `X0` and `X1`, using `X2` and
@@ -599,31 +605,30 @@ def swap_code : List Instr := [
 
 /-- Besides swapping, `swap` guarantees that it changes no other memory and no
 registers other than `X2` and `X3`. That is more than the calling convention
-demands, and `swap_swap_ok` relies on it. Both words are in the core's memory,
-so the platform is not involved. -/
-theorem swap_ok {P : Type} (pl : Platform P) (syms : Symbols) (prog : Program)
+demands, and `swap_swap_ok` relies on it. -/
+theorem swap_ok (syms : Symbols) (prog : Program)
     (hswap : Loaded prog (syms "swap") swap_code)
-    (p q v w : Word) (s : State) (ps : P) (hpc : s.pc = syms "swap")
+    (p q v w : Word) (s : State) (m : Mem) (hpc : s.pc = syms "swap")
     (hp : s.regs .X0 = p) (hq : s.regs .X1 = q) (hpq : p ≠ q)
-    (hv : s.mem p = some v) (hw : s.mem q = some w) :
-    Core.wp pl syms prog
+    (hv : m p = some v) (hw : m q = some w) :
+    Core.wp memPlatform syms prog
       (fun sp => sp.1.pc = s.regs .X30 ∧
-        sp.1.mem p = some w ∧ sp.1.mem q = some v ∧
-        (∀ a, a ≠ p → a ≠ q → sp.1.mem a = s.mem a) ∧
-        (∀ r, r ≠ .X2 → r ≠ .X3 → sp.1.regs r = s.regs r) ∧
-        sp.2 = ps) (s, ps) := by
+        sp.2 p = some w ∧ sp.2 q = some v ∧
+        (∀ a, a ≠ p → a ≠ q → sp.2 a = m a) ∧
+        (∀ r, r ≠ .X2 → r ≠ .X3 → sp.1.regs r = s.regs r))
+      (s, m) := by
   generalize syms "swap" = swap at *
   refine Core.wp_of_pc hpc ?_
   instr .ldr .X2 .X0 0 at swap
-  simp [hp, hv]
+  simp [memPlatform, hp, hv]
   instr .ldr .X3 .X1 0 at swap + 0x4
   simp [hq, hw]
   instr .str .X3 .X0 0 at swap + 0x8
   simp [hp, hv]
   instr .str .X2 .X1 0 at swap + 0xc
-  simp [hq, hw]
+  simp [Mem.set, hq, hw, Ne.symm hpq]
   instr .ret .X30 at swap + 0x10
-  exact .done (by grind)
+  exact .done (by simp [Mem.set]; grind)
 
 /-! ## Example: swapping twice -/
 
@@ -636,31 +641,30 @@ def swap_swap_code : List Instr := [
   .ret .X9
 ]
 
-theorem swap_swap_ok {P : Type} (pl : Platform P) (syms : Symbols)
-    (prog : Program)
+theorem swap_swap_ok (syms : Symbols) (prog : Program)
     (hswap_swap : Loaded prog (syms "swap_swap") swap_swap_code)
     (hswap : Loaded prog (syms "swap") swap_code)
-    (p q v w : Word) (s : State) (ps : P) (hpc : s.pc = syms "swap_swap")
+    (p q v w : Word) (s : State) (m : Mem) (hpc : s.pc = syms "swap_swap")
     (hp : s.regs .X0 = p) (hq : s.regs .X1 = q) (hpq : p ≠ q)
-    (hv : s.mem p = some v) (hw : s.mem q = some w) :
-    Core.wp pl syms prog
-      (fun sp => sp.1.pc = s.regs .X30 ∧ sp.1.mem = s.mem ∧
-        ∀ r ∈ Reg.calleeSaved, sp.1.regs r = s.regs r) (s, ps) := by
+    (hv : m p = some v) (hw : m q = some w) :
+    Core.wp memPlatform syms prog
+      (fun sp => sp.1.pc = s.regs .X30 ∧ sp.2 = m ∧
+        ∀ r ∈ Reg.calleeSaved, sp.1.regs r = s.regs r) (s, m) := by
   generalize syms "swap_swap" = swap_swap at *
   refine Core.wp_of_pc hpc ?_
   instr .mov .X9 (.reg .X30) at swap_swap
   instr .bl "swap" at swap_swap + 0x4
   refine eventually_trans
-    (swap_ok pl syms prog hswap p q v w _ _ rfl (by simp [hp]) (by simp [hq])
+    (swap_ok syms prog hswap p q v w _ _ rfl (by simp [hp]) (by simp [hq])
       hpq hv hw) ?_
-  intro s1 ⟨hpc1, hp1, hq1, hmem1, hregs1, hps1⟩
+  intro s1 ⟨hpc1, hp1, hq1, hmem1, hregs1⟩
   simp at hpc1 hp1 hq1 hmem1 hregs1
   refine Core.wp_of_pc hpc1 ?_
   instr .bl "swap" at swap_swap + 0x8
   refine eventually_trans
-    (swap_ok pl syms prog hswap p q w v _ _ rfl (by simp [hregs1, hp])
+    (swap_ok syms prog hswap p q w v _ _ rfl (by simp [hregs1, hp])
       (by simp [hregs1, hq]) hpq hp1 hq1) ?_
-  intro s2 ⟨hpc2, hp2, hq2, hmem2, hregs2, hps2⟩
+  intro s2 ⟨hpc2, hp2, hq2, hmem2, hregs2⟩
   simp at hpc2 hp2 hq2 hmem2 hregs2
   refine Core.wp_of_pc hpc2 ?_
   instr .ret .X9 at swap_swap + 0xc

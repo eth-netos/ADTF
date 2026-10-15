@@ -10,95 +10,98 @@ import MiniIMX93
 (Trusted Resource Domain Controller) with its memory-mapped registers, and the
 initiators, among them a USB controller.
 
-Here, a core as defined by `ISA.lean` is added to that platform. The state of
-the whole system is a core state and a platform state. The core's loads and
-stores at addresses that are not in its own memory become requests from the
-CPU's domain to the interconnect of the platform. This file defines what such a
-load or store does, both for proofs (`imx93`, a `Platform`) and for running
-with concrete values (`Effects.run`).
+The module `System` of that model leaves open how its CPU core is implemented:
+it has a callee `cpu` of interface `CPU`, which the Lean backend translates to a
+field of type `CPU S` of `SystemRef S`, a structure with one Lean function per
+function of the interface. The Sockeye scenarios connect it to a CPU core that
+sends arbitrary requests. Here, the core of `ISA.lean` is plugged in instead.
+The state of the whole system is then the core's state and the state of the
+Sockeye model. The core's memory accesses become requests from the CPU's domain
+to the interconnect of the model.
 
 The scenarios configure the TRDC by running a firmware program on the core,
-whose stores reach the TRDC's registers through the interconnect, and then let
+whose writes reach the TRDC's registers through the interconnect, and then let
 a USB controller that has gone rogue try to overwrite Linux's memory.
 -/
 
 namespace ToySys
 
-/-! ## Loads and stores of the core on the platform -/
+/-! ## The core as the CPU of the system -/
 
-/-- Whether a core address can be sent to the platform, whose addresses have 32
-bits. -/
+/-- The state of the whole system: the state of the core and the state of the
+Sockeye model. -/
+abbrev SysState := Prod State MainState
+
+def SysState.lens_core : Lens SysState State where
+  get := fun sp => sp.1
+  set := fun sp s => (s, sp.2)
+
+def SysState.lens_model : Lens SysState MainState where
+  get := fun sp => sp.2
+  set := fun sp p => (sp.1, p)
+
+/-- Whether a core address can be sent to the interconnect, whose addresses have
+32 bits. -/
 def IsPhysAddr (a : Word) : Prop := a.toNat < 2 ^ 32
 
 instance (a : Word) : Decidable (IsPhysAddr a) :=
   inferInstanceAs (Decidable (a.toNat < 2 ^ 32))
 
-/-- The request of the core for a load (`mode := .read`) or a store of `v` to
-address `a`. Values have 32 bits on the platform. -/
+/-- The request of the core for a read (`mode := .read`) or a write of `v` to
+address `a`. Values have 32 bits on the interconnect. -/
 def coreRequest (a v : Word) (mode : AccessMode) : Request :=
   { address := a.setWidth 32, value := v.setWidth 32, mode := mode,
     domain_id := CPU_DOMAIN_ID }
 
-/-- The platform of the toy i.MX 93, for proofs: the core's loads and stores at
-addresses outside its memory are served by the interconnect, as computed by the
-translation of the Sockeye model in the specification monad `SpecM`. An access
-that the interconnect denies, or to an address of more than 32 bits, is an
-error. -/
-def imx93 : Platform MainState where
-  load a p post :=
-    IsPhysAddr a /\
-    SpecM.wp (Interconnect.request Instances.main.system.interconnect
-        (coreRequest a 0 .read))
-      (fun reply p' => reply.ok = true /\ post (reply.value.setWidth 64) p') p
-  store a v p post :=
-    IsPhysAddr a /\
-    SpecM.wp (Interconnect.request Instances.main.system.interconnect
-        (coreRequest a v .write))
-      (fun reply p' => reply.ok = true /\ post p') p
+/-- Performs the effects `e` of the core, in any monad that the code translated
+from Sockeye can run in, and stores the core state that they end in with the
+lens `core`. Memory accesses are sent to the interconnect `ic`. An error, an
+access that the interconnect denies, and an access to an address of more than 32
+bits fail an assertion. -/
+def Effects.toM {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+    (ic : InterconnectRef S) (core : Lens S State) : Effects -> M Unit
+  | .done s => core.setM s
+  | .error msg => SockeyeMonad.assert false msg
+  | .mem_read a ret => do
+    SockeyeMonad.assert (decide (IsPhysAddr a)) "address of at most 32 bits"
+    let reply <- Interconnect.request ic (coreRequest a 0 .read)
+    SockeyeMonad.assert reply.ok "the interconnect serves the read"
+    Effects.toM ic core (ret (reply.value.setWidth 64))
+  | .mem_write a v ret => do
+    SockeyeMonad.assert (decide (IsPhysAddr a)) "address of at most 32 bits"
+    let reply <- Interconnect.request ic (coreRequest a v .write)
+    SockeyeMonad.assert reply.ok "the interconnect serves the write"
+    Effects.toM ic core ret
+
+/-- The core as an implementation of the interface `CPU`: a step executes the
+instruction of `prog` at the program counter. -/
+def coreCpu {S : Type} (syms : Symbols) (prog : Program)
+    (ic : InterconnectRef S) (core : Lens S State) : CPU S where
+  step := do
+    let s <- core.getM
+    Effects.toM ic core (Core.step syms prog s)
+
+/-- The system of the Sockeye model, wired up as in the Sockeye scenarios
+(`Instances.main.system`), except that its CPU is the core running `prog`. -/
+def system (syms : Symbols) (prog : Program) : SystemRef SysState :=
+  let model := Instances.main.system SysState.lens_model
+  { model with cpu := coreCpu syms prog model.interconnect SysState.lens_core }
 
 /-! ## Running with concrete values -/
 
-/-- Runs a request of the core on the platform in the execution monad `ExecM`,
-with `seed` determining the values that `any` picks. -/
-def runRequest (seed : Nat) (p : MainState) (a v : Word) (mode : AccessMode) :
-    Except String (Prod Reply MainState) :=
-  if IsPhysAddr a then
-    match ExecM.run (Interconnect.request Instances.main.system.interconnect
-        (coreRequest a v mode)) seed p with
-    | (ExecResult.success reply, p') =>
-      if reply.ok then .ok (reply, p') else .error s!"bus error at {a}"
-    | (ExecResult.assertionFailed code, _) =>
-      .error s!"assertion failed in the platform: {code}"
-    | (ExecResult.assumptionFailed code, _) =>
-      .error s!"assumption failed in the platform: {code}"
-  else .error s!"address {a} has more than 32 bits"
-
-/-- The effects interpreter for running with concrete values: performs the
-effects `e` with the platform in state `p`. -/
-def Effects.run (seed : Nat) : Effects -> MainState ->
-    Except String (Prod State MainState)
-  | .done s, p => .ok (s, p)
-  | .error msg, _ => .error msg
-  | .nonmem_load a ret, p =>
-    match runRequest seed p a 0 .read with
-    | .ok (reply, p') => (ret (reply.value.setWidth 64)).run seed p'
-    | .error msg => .error msg
-  | .nonmem_store a v ret, p =>
-    match runRequest seed p a v .write with
-    | .ok (_, p') => ret.run seed p'
-    | .error msg => .error msg
-
-/-- Runs the core on the platform until its program counter is `stop`, for at
-most `fuel` steps. -/
+/-- Runs the core in the system until its program counter is `stop`, for at most
+`fuel` steps, with `seed` determining the values that `any` picks. -/
 def Core.run (seed fuel : Nat) (syms : Symbols) (prog : Program) (stop : Word)
-    (sp : Prod State MainState) : Except String (Prod State MainState) :=
+    (sp : SysState) : Except String SysState :=
   if sp.1.pc = stop then .ok sp
   else match fuel with
     | 0 => .error "out of fuel"
     | fuel + 1 =>
-      match (Core.step syms prog sp.1).run seed sp.2 with
-      | .ok sp' => Core.run seed fuel syms prog stop sp'
-      | .error msg => .error msg
+      match ExecM.run ((system syms prog).cpu.step : ExecM SysState Unit)
+          seed sp with
+      | (.success (), sp') => Core.run seed fuel syms prog stop sp'
+      | (.assertionFailed code, _) => .error s!"assertion failed: {code}"
+      | (.assumptionFailed code, _) => .error s!"assumption failed: {code}"
 
 /-- The program that holds `code` at address `base` and nothing else. -/
 def Program.ofCode (base : Word) (code : List Instr) : Program :=
@@ -148,15 +151,14 @@ def bad_firmware_code : List Instr :=
 def firmwareBase : Word := 0x1000
 def returnAddress : Word := 0x2000
 
-/-- The core out of reset, about to run the firmware: it has no memory of its
-own, so all its loads and stores go to the platform. -/
+/-- The core out of reset, about to run the firmware. -/
 def resetCore : State :=
   { regs := fun r => if r = .X30 then returnAddress else 0, flags := {},
-    mem := fun _ => none, pc := firmwareBase }
+    pc := firmwareBase }
 
-/-- Runs a firmware on the core, from reset, with the platform out of reset
+/-- Runs a firmware on the core, from reset, with the Sockeye model out of reset
 (all TRDC registers and all of DRAM zero), until it returns. -/
-def runFirmware (code : List Instr) : Except String (Prod State MainState) :=
+def runFirmware (code : List Instr) : Except String SysState :=
   Core.run 0 100 (fun _ => 0) (Program.ofCode firmwareBase code) returnAddress
     (resetCore, {})
 
@@ -167,7 +169,7 @@ def linuxLast : BitVec 31 := 0x0FFFFFFF
 
 /-- The USB controller writes `0xDEADBEEF` to physical address `a`. -/
 def rogueUsbWrite (a : PhysAddr) (p : MainState) : MainState :=
-  (ExecM.run (Interconnect.request Instances.main.system.interconnect
+  (ExecM.run (Interconnect.request (Instances.main.system.interconnect Lens.id)
       { address := a, value := 0xDEADBEEF, mode := .write,
         domain_id := USB_DOMAIN_ID }) 0 p).2
 
@@ -244,7 +246,7 @@ theorem usb_cannot_write_linux (p : MainState)
     (h3 : p.system.trdc_mgr.raw_regs 0x62D3#15 = 0)
     (h5 : p.system.trdc_mgr.raw_regs 0x62D5#15 = 0)
     (h7 : p.system.trdc_mgr.raw_regs 0x62D7#15 = 0) :
-    SpecM.wp (Usb.step Instances.main.system.usb)
+    SpecM.wp (Usb.step (Instances.main.system.usb Lens.id))
       (fun _ p' => forall a : BitVec 31, a <= linuxLast ->
         p'.system.dram.backing a = p.system.dram.backing a) p := by
   simp [Usb.step, Interconnect.request, TRDC_MRC.request, TRDC_MRC.is_access_allowed,
@@ -276,7 +278,7 @@ theorem usb_cannot_write_linux (p : MainState)
   have h0 : a ≠ off := by bv_omega
   simp [h3, h2, h1, h0]
 
-/-- The platform state after the good firmware has run. -/
+/-- The state of the Sockeye model after the good firmware has run. -/
 def goodPlatform : MainState :=
   match runFirmware good_firmware_code with
   | .ok (_, p) => p
@@ -297,7 +299,7 @@ theorem good_firmware_configures_trdc :
 /-- After the good firmware, a rogue USB controller cannot change Linux's
 memory. -/
 theorem linux_protected_after_good_firmware :
-    SpecM.wp (Usb.step Instances.main.system.usb)
+    SpecM.wp (Usb.step (Instances.main.system.usb Lens.id))
       (fun _ p' => forall a : BitVec 31, a <= linuxLast ->
         p'.system.dram.backing a = goodPlatform.system.dram.backing a)
       goodPlatform := by

@@ -325,7 +325,7 @@ def TRDC_MGRState.lens_raw_regs : Lens TRDC_MGRState (Vec 15 (BitVec 32)) where
 structure TRDC_MRCState where
   deriving Repr
 
-structure CpuState where
+structure AnyRequestCpuState where
   deriving Repr
 
 structure UsbState where
@@ -340,7 +340,6 @@ structure SystemState where
   trdc_mgr : TRDC_MGRState := {}
   mrc : TRDC_MRCState := {}
   interconnect : InterconnectState := {}
-  cpu : CpuState := {}
   usb : UsbState := {}
 
 def SystemState.lens_dram : Lens SystemState DramState where
@@ -363,23 +362,32 @@ def SystemState.lens_interconnect : Lens SystemState InterconnectState where
   get := fun s => s.interconnect
   set := fun s v => { s with interconnect := v }
 
-def SystemState.lens_cpu : Lens SystemState CpuState where
-  get := fun s => s.cpu
-  set := fun s v => { s with cpu := v }
-
 def SystemState.lens_usb : Lens SystemState UsbState where
   get := fun s => s.usb
   set := fun s v => { s with usb := v }
 
 structure MainState where
   system : SystemState := {}
+  cpu : AnyRequestCpuState := {}
 
 def MainState.lens_system : Lens MainState SystemState where
   get := fun s => s.system
   set := fun s v => { s with system := v }
 
+def MainState.lens_cpu : Lens MainState AnyRequestCpuState where
+  get := fun s => s.cpu
+  set := fun s v => { s with cpu := v }
+
 
 /-! ## Module references: where an instance, its sub-instances and its callees are in the state `S` of the whole system -/
+
+/-- An implementation of the interface `Handler` in a system with state `S`. -/
+structure Handler (S : Type) where
+  request : {M : Type -> Type} -> [SockeyeMonad S M] -> (r : Request) -> M Reply
+
+/-- An implementation of the interface `CPU` in a system with state `S`. -/
+structure CPU (S : Type) where
+  step : {M : Type -> Type} -> [SockeyeMonad S M] -> M Unit
 
 structure DramRef (S : Type) where
   _lens : Lens S DramState
@@ -393,21 +401,21 @@ structure TRDC_MGRRef (S : Type) where
 structure TRDC_MRCRef (S : Type) where
   _lens : Lens S TRDC_MRCState
   trdc_mgr : TRDC_MGRRef S
-  target : DramRef S
+  target : Handler S
 
-structure InterconnectRef (S : Type) where
-  _lens : Lens S InterconnectState
-  dram_protected_by_mrc : TRDC_MRCRef S
-  usb_regs : GenericSinkRef S
-  trdc_mgr : TRDC_MGRRef S
-
-structure CpuRef (S : Type) where
-  _lens : Lens S CpuState
-  downstream : InterconnectRef S
+structure AnyRequestCpuRef (S : Type) where
+  _lens : Lens S AnyRequestCpuState
+  downstream : Handler S
 
 structure UsbRef (S : Type) where
   _lens : Lens S UsbState
-  downstream : InterconnectRef S
+  downstream : Handler S
+
+structure InterconnectRef (S : Type) where
+  _lens : Lens S InterconnectState
+  dram_protected_by_mrc : Handler S
+  usb_regs : Handler S
+  trdc_mgr : Handler S
 
 structure SystemRef (S : Type) where
   _lens : Lens S SystemState
@@ -416,12 +424,13 @@ structure SystemRef (S : Type) where
   trdc_mgr : TRDC_MGRRef S
   mrc : TRDC_MRCRef S
   interconnect : InterconnectRef S
-  cpu : CpuRef S
   usb : UsbRef S
+  cpu : CPU S
 
 structure MainRef (S : Type) where
   _lens : Lens S MainState
   system : SystemRef S
+  cpu : AnyRequestCpuRef S
 
 
 /-! ## Functions -/
@@ -576,11 +585,27 @@ def TRDC_MRC.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
       pure (r.domain_id == TRDC_MRC.ALLOWED_DEFAULT_DID)
   let _t6 : Reply <-
     if allowed then do
-      Dram.request self.target r
+      self.target.request r
     else do
       let _t5 <- SockeyeMonad.any Reply
       pure ({ _t5 with ok := false } : Reply)
   pure _t6
+
+-- Module AnyRequestCpu
+
+def AnyRequestCpu.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+    (self : AnyRequestCpuRef S) : M Unit := do
+  let _t1 <- SockeyeMonad.any Request
+  let ignored : Reply <- self.downstream.request ({ _t1 with domain_id := CPU_DOMAIN_ID } : Request)
+  pure ()
+
+-- Module Usb
+
+def Usb.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+    (self : UsbRef S) : M Unit := do
+  let _t1 <- SockeyeMonad.any Request
+  let ignored : Reply <- self.downstream.request ({ _t1 with domain_id := USB_DOMAIN_ID } : Request)
+  pure ()
 
 -- Module Interconnect
 
@@ -589,17 +614,17 @@ def Interconnect.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
   let a : (BitVec 32) := r.address
   let _t9 : Reply <-
     if (BitVec.ule 0x80000000#32 a) then do
-      TRDC_MRC.request self.dram_protected_by_mrc r
+      self.dram_protected_by_mrc.request r
     else do
       let _t8 : Reply <-
         if ((BitVec.ule 0x4c100000#32 a) && (BitVec.ule a 0x4c1fffff#32)) then do
-          GenericSink.request self.usb_regs r
+          self.usb_regs.request r
         else do
           let _t7 : Reply <-
             if ((BitVec.ule 0x49010000#32 a) && (BitVec.ule a 0x4902ffff#32)) then do
               let _t5 : Reply <-
                 if (r.domain_id == CPU_DOMAIN_ID) then do
-                  TRDC_MGR.request self.trdc_mgr r
+                  self.trdc_mgr.request r
                 else do
                   let _t4 <- SockeyeMonad.any Reply
                   pure ({ _t4 with ok := false } : Reply)
@@ -610,22 +635,6 @@ def Interconnect.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
           pure _t7
       pure _t8
   pure _t9
-
--- Module Cpu
-
-def Cpu.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
-    (self : CpuRef S) : M Unit := do
-  let _t1 <- SockeyeMonad.any Request
-  let ignored : Reply <- Interconnect.request self.downstream ({ _t1 with domain_id := CPU_DOMAIN_ID } : Request)
-  pure ()
-
--- Module Usb
-
-def Usb.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
-    (self : UsbRef S) : M Unit := do
-  let _t1 <- SockeyeMonad.any Request
-  let ignored : Reply <- Interconnect.request self.downstream ({ _t1 with domain_id := USB_DOMAIN_ID } : Request)
-  pure ()
 
 -- Module System
 
@@ -638,7 +647,7 @@ def System.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : SystemRef S) : M Unit := do
   let _t1 <- SockeyeMonad.any Bool
   if _t1 then do
-    Cpu.step self.cpu
+    self.cpu.step
     pure ()
   else do
     Usb.step self.usb
@@ -760,45 +769,46 @@ def Main.test_bad_config_one_write {S : Type} {M : Type -> Type} [SockeyeMonad S
 
 /-! ## Instances, with their callees wired up -/
 
-def Instances.main.system.dram : DramRef MainState where
-  _lens := ((Lens.id.compose MainState.lens_system).compose SystemState.lens_dram)
+def Instances.main.system.dram {S : Type} (root : Lens S MainState) : DramRef S where
+  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_dram)
 
-def Instances.main.system.usb_regs : GenericSinkRef MainState where
-  _lens := ((Lens.id.compose MainState.lens_system).compose SystemState.lens_usb_regs)
+def Instances.main.system.usb_regs {S : Type} (root : Lens S MainState) : GenericSinkRef S where
+  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_usb_regs)
 
-def Instances.main.system.trdc_mgr : TRDC_MGRRef MainState where
-  _lens := ((Lens.id.compose MainState.lens_system).compose SystemState.lens_trdc_mgr)
+def Instances.main.system.trdc_mgr {S : Type} (root : Lens S MainState) : TRDC_MGRRef S where
+  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_trdc_mgr)
 
-def Instances.main.system.mrc : TRDC_MRCRef MainState where
-  _lens := ((Lens.id.compose MainState.lens_system).compose SystemState.lens_mrc)
-  trdc_mgr := Instances.main.system.trdc_mgr
-  target := Instances.main.system.dram
+def Instances.main.system.mrc {S : Type} (root : Lens S MainState) : TRDC_MRCRef S where
+  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_mrc)
+  trdc_mgr := (Instances.main.system.trdc_mgr root)
+  target := { request := Dram.request (Instances.main.system.dram root) }
 
-def Instances.main.system.interconnect : InterconnectRef MainState where
-  _lens := ((Lens.id.compose MainState.lens_system).compose SystemState.lens_interconnect)
-  dram_protected_by_mrc := Instances.main.system.mrc
-  usb_regs := Instances.main.system.usb_regs
-  trdc_mgr := Instances.main.system.trdc_mgr
+def Instances.main.system.interconnect {S : Type} (root : Lens S MainState) : InterconnectRef S where
+  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_interconnect)
+  dram_protected_by_mrc := { request := TRDC_MRC.request (Instances.main.system.mrc root) }
+  usb_regs := { request := GenericSink.request (Instances.main.system.usb_regs root) }
+  trdc_mgr := { request := TRDC_MGR.request (Instances.main.system.trdc_mgr root) }
 
-def Instances.main.system.cpu : CpuRef MainState where
-  _lens := ((Lens.id.compose MainState.lens_system).compose SystemState.lens_cpu)
-  downstream := Instances.main.system.interconnect
+def Instances.main.system.usb {S : Type} (root : Lens S MainState) : UsbRef S where
+  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_usb)
+  downstream := { request := Interconnect.request (Instances.main.system.interconnect root) }
 
-def Instances.main.system.usb : UsbRef MainState where
-  _lens := ((Lens.id.compose MainState.lens_system).compose SystemState.lens_usb)
-  downstream := Instances.main.system.interconnect
+def Instances.main.cpu {S : Type} (root : Lens S MainState) : AnyRequestCpuRef S where
+  _lens := (root.compose MainState.lens_cpu)
+  downstream := { request := Interconnect.request (Instances.main.system.interconnect root) }
 
-def Instances.main.system : SystemRef MainState where
-  _lens := (Lens.id.compose MainState.lens_system)
-  dram := Instances.main.system.dram
-  usb_regs := Instances.main.system.usb_regs
-  trdc_mgr := Instances.main.system.trdc_mgr
-  mrc := Instances.main.system.mrc
-  interconnect := Instances.main.system.interconnect
-  cpu := Instances.main.system.cpu
-  usb := Instances.main.system.usb
+def Instances.main.system {S : Type} (root : Lens S MainState) : SystemRef S where
+  _lens := (root.compose MainState.lens_system)
+  dram := (Instances.main.system.dram root)
+  usb_regs := (Instances.main.system.usb_regs root)
+  trdc_mgr := (Instances.main.system.trdc_mgr root)
+  mrc := (Instances.main.system.mrc root)
+  interconnect := (Instances.main.system.interconnect root)
+  usb := (Instances.main.system.usb root)
+  cpu := { step := AnyRequestCpu.step (Instances.main.cpu root) }
 
-def Instances.main : MainRef MainState where
-  _lens := Lens.id
-  system := Instances.main.system
+def Instances.main {S : Type} (root : Lens S MainState) : MainRef S where
+  _lens := root
+  system := (Instances.main.system root)
+  cpu := (Instances.main.cpu root)
 
