@@ -64,12 +64,12 @@ def Effects.toM {S : Type} {M : Type -> Type} [SockeyeMonad S M]
   | .error msg => SockeyeMonad.assert false msg
   | .mem_read a ret => do
     SockeyeMonad.assert (decide (IsPhysAddr a)) "address of at most 32 bits"
-    let reply <- Interconnect.request ic (coreRequest a 0 .read)
+    let reply <- ic.request (coreRequest a 0 .read)
     SockeyeMonad.assert reply.ok "the interconnect serves the read"
     Effects.toM ic core (ret (reply.value.setWidth 64))
   | .mem_write a v ret => do
     SockeyeMonad.assert (decide (IsPhysAddr a)) "address of at most 32 bits"
-    let reply <- Interconnect.request ic (coreRequest a v .write)
+    let reply <- ic.request (coreRequest a v .write)
     SockeyeMonad.assert reply.ok "the interconnect serves the write"
     Effects.toM ic core ret
 
@@ -169,7 +169,7 @@ def linuxLast : BitVec 31 := 0x0FFFFFFF
 
 /-- The USB controller writes `0xDEADBEEF` to physical address `a`. -/
 def rogueUsbWrite (a : PhysAddr) (p : MainState) : MainState :=
-  (ExecM.run (Interconnect.request (Instances.main.system.interconnect Lens.id)
+  (ExecM.run ((Instances.main.system.interconnect Lens.id).request
       { address := a, value := 0xDEADBEEF, mode := .write,
         domain_id := USB_DOMAIN_ID }) 0 p).2
 
@@ -246,21 +246,26 @@ theorem usb_cannot_write_linux (p : MainState)
     (h3 : p.system.trdc_mgr.raw_regs 0x62D3#15 = 0)
     (h5 : p.system.trdc_mgr.raw_regs 0x62D5#15 = 0)
     (h7 : p.system.trdc_mgr.raw_regs 0x62D7#15 = 0) :
-    SpecM.wp (Usb.step (Instances.main.system.usb Lens.id))
+    SpecM.wp (Instances.main.system.usb Lens.id).step
       (fun _ p' => forall a : BitVec 31, a <= linuxLast ->
         p'.system.dram.backing a = p.system.dram.backing a) p := by
-  simp [Usb.step, Interconnect.request, TRDC_MRC.request, TRDC_MRC.is_access_allowed,
-    TRDC_MRC.is_region_hit, TRDC_MRC.is_access_allowed_by_region, TRDC_MRC.is_allowed_by_glbac,
-    TRDC_MGR.get_TRDC_CR, TRDC_MGR.offset_TRDC_CR, TRDC_MGR.read32bit_reg,
-    TRDC_MGR.get_MRC0_DOMd_RGDr_Ww, TRDC_MGR.offset_MRC0_DOMd_RGDr_Ww,
-    TRDC_MGR.get_MRC0_GLBACn, TRDC_MGR.offset_MRC0_GLBACn, TRDC_MGR.MRC_BASE,
-    Dram.request, GenericSink.request,
-    Lens.getM, Lens.loadM, Lens.storeM, Lens.modifyM, Lens.compose, Lens.id, Vec.set,
-    Instances.main.system.usb, Instances.main.system.interconnect, Instances.main.system.mrc,
-    Instances.main.system.trdc_mgr, Instances.main.system.dram, Instances.main.system.usb_regs,
+  simp [UsbRef.step, InterconnectRef.request, TRDC_MRCRef.request,
+    TRDC_MRCRef.is_access_allowed, TRDC_MRCRef.is_region_hit,
+    TRDC_MRCRef.is_access_allowed_by_region, TRDC_MRCRef.is_allowed_by_glbac,
+    TRDC_MGRRef.get_TRDC_CR, TRDC_MGRRef.offset_TRDC_CR,
+    TRDC_MGRRef.read32bit_reg, TRDC_MGRRef.get_MRC0_DOMd_RGDr_Ww,
+    TRDC_MGRRef.offset_MRC0_DOMd_RGDr_Ww, TRDC_MGRRef.get_MRC0_GLBACn,
+    TRDC_MGRRef.offset_MRC0_GLBACn, TRDC_MGR.MRC_BASE,
+    DramRef.request, GenericSinkRef.request,
+    ArrayRef.load, ArrayRef.store, Lens.getM, Lens.modifyM, Lens.compose,
+    Lens.id, Vec.set,
+    Instances.main.system.usb, Instances.main.system.interconnect,
+    Instances.main.system.mrc, Instances.main.system.trdc_mgr,
+    Instances.main.system.dram, Instances.main.system.usb_regs,
     MainState.lens_system, SystemState.lens_trdc_mgr, SystemState.lens_dram,
     TRDC_MGRState.lens_raw_regs, DramState.lens_backing,
-    USB_DOMAIN_ID, CPU_DOMAIN_ID, TRDC_MRC.ALLOWED_DEFAULT_DID, h0, h1, h3, h5, h7]
+    USB_DOMAIN_ID, CPU_DOMAIN_ID, TRDC_MRC.ALLOWED_DEFAULT_DID,
+    h0, h1, h3, h5, h7]
   intro x _ _ hlo hhi _ _ a ha
   -- The USB controller can only write in the DMA region, which none of the
   -- four bytes written overlaps with Linux's memory.
@@ -299,7 +304,7 @@ theorem good_firmware_configures_trdc :
 /-- After the good firmware, a rogue USB controller cannot change Linux's
 memory. -/
 theorem linux_protected_after_good_firmware :
-    SpecM.wp (Usb.step (Instances.main.system.usb Lens.id))
+    SpecM.wp (Instances.main.system.usb Lens.id).step
       (fun _ p' => forall a : BitVec 31, a <= linuxLast ->
         p'.system.dram.backing a = goodPlatform.system.dram.backing a)
       goodPlatform := by

@@ -148,22 +148,55 @@ def Lens.setM {S P : Type} {M : Type -> Type} [SockeyeMonad S M] (l : Lens S P) 
     M Unit :=
   l.modifyM (fun _ => v)
 
+/-! ## References to primitive instances
+
+Like the `Ref` structures that the backend emits for user-defined modules, these say where an
+instance is in the state `S` of the whole system, and their functions are named like the Sockeye
+builtins, so that a Sockeye call `x.f(args)` always becomes `self.x.f args`. -/
+
+/-- Where an instance of `State<P>` is. -/
+structure StateRef (S P : Type) where
+  _lens : Lens S P
+
+/-- `st.get()`. -/
+def StateRef.get {S P : Type} {M : Type -> Type} [SockeyeMonad S M] (self : StateRef S P) : M P :=
+  self._lens.getM
+
+/-- `st.set(v)`. -/
+def StateRef.set {S P : Type} {M : Type -> Type} [SockeyeMonad S M] (self : StateRef S P) (v : P) :
+    M Unit :=
+  self._lens.setM v
+
+/-- Where an instance of `Array<BitInt(n), V>` is. Its contents are a `Vec n V`. -/
+structure ArrayRef (S : Type) (n : Nat) (V : Type) where
+  _lens : Lens S (Vec n V)
+
+/-- `arr.get()`, the whole contents. -/
+def ArrayRef.get {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M]
+    (self : ArrayRef S n V) : M (Vec n V) :=
+  self._lens.getM
+
+/-- `arr.set(a)`, which replaces the whole contents. -/
+def ArrayRef.set {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M]
+    (self : ArrayRef S n V) (a : Vec n V) : M Unit :=
+  self._lens.setM a
+
 /-- `arr.load(i)`. -/
-def Lens.loadM {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M] (l : Lens S (Vec n V))
-    (i : BitVec n) : M V := do
-  let a <- l.getM
+def ArrayRef.load {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M]
+    (self : ArrayRef S n V) (i : BitVec n) : M V := do
+  let a <- self._lens.getM
   pure (a i)
 
 /-- `arr.store(i, x)`. -/
-def Lens.storeM {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M]
-    (l : Lens S (Vec n V)) (i : BitVec n) (x : V) : M Unit :=
-  l.modifyM (fun a => a.set i x)
+def ArrayRef.store {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M]
+    (self : ArrayRef S n V) (i : BitVec n) (x : V) : M Unit :=
+  self._lens.modifyM (fun a => a.set i x)
 
 /-- `arr.store_repeated_inclusive(lo, hi, x)`. It is an error if `lo` is above `hi`. -/
-def Lens.storeRepeatedInclusiveM {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M]
-    (l : Lens S (Vec n V)) (lo hi : BitVec n) (x : V) : M Unit := do
+def ArrayRef.store_repeated_inclusive {S V : Type} {n : Nat} {M : Type -> Type}
+    [SockeyeMonad S M] (self : ArrayRef S n V) (lo hi : BitVec n) (x : V) : M Unit := do
   SockeyeMonad.assert (lo.ule hi) "store_repeated_inclusive: low <= high"
-  l.modifyM (fun a => a.setRange lo hi x)
+  self._lens.modifyM (fun a => a.setRange lo hi x)
 
 /-! ## Proving: weakest preconditions -/
 
@@ -391,12 +424,14 @@ structure CPU (S : Type) where
 
 structure DramRef (S : Type) where
   _lens : Lens S DramState
+  backing : ArrayRef S 31 Byte
 
 structure GenericSinkRef (S : Type) where
   _lens : Lens S GenericSinkState
 
 structure TRDC_MGRRef (S : Type) where
   _lens : Lens S TRDC_MGRState
+  raw_regs : ArrayRef S 15 (BitVec 32)
 
 structure TRDC_MRCRef (S : Type) where
   _lens : Lens S TRDC_MRCState
@@ -437,78 +472,78 @@ structure MainRef (S : Type) where
 
 -- Module Dram
 
-def Dram.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def DramRef.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : DramRef S) (r : Request) : M Reply := do
   let byte_off : (BitVec 31) := (BitVec.extractLsb' 0 31 r.address)
   let _t5 : Reply <-
     if (r.mode == AccessMode.write) then do
       let value : (BitVec 32) := r.value
-      (self._lens.compose DramState.lens_backing).storeM byte_off (BitVec.extractLsb' 0 8 value)
-      (self._lens.compose DramState.lens_backing).storeM (byte_off + 1#31) (BitVec.extractLsb' 8 8 value)
-      (self._lens.compose DramState.lens_backing).storeM (byte_off + 2#31) (BitVec.extractLsb' 16 8 value)
-      (self._lens.compose DramState.lens_backing).storeM (byte_off + 3#31) (BitVec.extractLsb' 24 8 value)
+      self.backing.store byte_off (BitVec.extractLsb' 0 8 value)
+      self.backing.store (byte_off + 1#31) (BitVec.extractLsb' 8 8 value)
+      self.backing.store (byte_off + 2#31) (BitVec.extractLsb' 16 8 value)
+      self.backing.store (byte_off + 3#31) (BitVec.extractLsb' 24 8 value)
       pure ({ ok := true, value := 0#32 } : Reply)
     else do
-      let _t1 <- (self._lens.compose DramState.lens_backing).loadM (byte_off + 3#31)
-      let _t2 <- (self._lens.compose DramState.lens_backing).loadM (byte_off + 2#31)
-      let _t3 <- (self._lens.compose DramState.lens_backing).loadM (byte_off + 1#31)
-      let _t4 <- (self._lens.compose DramState.lens_backing).loadM byte_off
+      let _t1 <- self.backing.load (byte_off + 3#31)
+      let _t2 <- self.backing.load (byte_off + 2#31)
+      let _t3 <- self.backing.load (byte_off + 1#31)
+      let _t4 <- self.backing.load byte_off
       let value_1 : (BitVec 32) := (((_t1 ++ _t2) ++ _t3) ++ _t4)
       pure ({ ok := true, value := value_1 } : Reply)
   pure _t5
 
 -- Module GenericSink
 
-def GenericSink.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def GenericSinkRef.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : GenericSinkRef S) (r : Request) : M Reply := do
   let _t1 <- SockeyeMonad.any Reply
   pure ({ _t1 with ok := false } : Reply)
 
 -- Module TRDC_MGR
 
-def TRDC_MGR.read32bit_reg {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MGRRef.read32bit_reg {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MGRRef S) (byte_offset : RegisterOffset) : M (BitVec 32) := do
-  (self._lens.compose TRDC_MGRState.lens_raw_regs).loadM (BitVec.extractLsb' 2 15 byte_offset)
+  self.raw_regs.load (BitVec.extractLsb' 2 15 byte_offset)
 
-def TRDC_MGR.offset_TRDC_CR {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MGRRef.offset_TRDC_CR {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MGRRef S) : M RegisterOffset := do
   pure 0#17
 
-def TRDC_MGR.get_TRDC_CR {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MGRRef.get_TRDC_CR {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MGRRef S) : M (BitVec 32) := do
-  let _t1 <- TRDC_MGR.offset_TRDC_CR self
-  TRDC_MGR.read32bit_reg self _t1
+  let _t1 <- self.offset_TRDC_CR
+  self.read32bit_reg _t1
 
-def TRDC_MGR.offset_MRC0_GLBACn {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MGRRef.offset_MRC0_GLBACn {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MGRRef S) (n : RegisterOffset) : M RegisterOffset := do
   pure ((TRDC_MGR.MRC_BASE + 0x20#17) + (n * 0x4#17))
 
-def TRDC_MGR.get_MRC0_GLBACn {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MGRRef.get_MRC0_GLBACn {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MGRRef S) (n : RegisterOffset) : M (BitVec 32) := do
-  let _t1 <- TRDC_MGR.offset_MRC0_GLBACn self n
-  TRDC_MGR.read32bit_reg self _t1
+  let _t1 <- self.offset_MRC0_GLBACn n
+  self.read32bit_reg _t1
 
-def TRDC_MGR.offset_MRC0_DOMd_RGDr_Ww {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MGRRef.offset_MRC0_DOMd_RGDr_Ww {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MGRRef S) (d : RegisterOffset) (r : RegisterOffset) (w : RegisterOffset) : M RegisterOffset := do
   pure ((((TRDC_MGR.MRC_BASE + 0x40#17) + (d * 0x100#17)) + (r * 0x8#17)) + (w * 0x4#17))
 
-def TRDC_MGR.get_MRC0_DOMd_RGDr_Ww {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MGRRef.get_MRC0_DOMd_RGDr_Ww {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MGRRef S) (d : RegisterOffset) (r : RegisterOffset) (w : RegisterOffset) : M (BitVec 32) := do
-  let _t1 <- TRDC_MGR.offset_MRC0_DOMd_RGDr_Ww self d r w
-  TRDC_MGR.read32bit_reg self _t1
+  let _t1 <- self.offset_MRC0_DOMd_RGDr_Ww d r w
+  self.read32bit_reg _t1
 
-def TRDC_MGR.is_register {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MGRRef.is_register {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MGRRef S) (o : RegisterOffset) : M Bool := do
   let rel : (BitVec 17) := (o - TRDC_MGR.MRC_BASE)
   let low_byte : (BitVec 8) := (BitVec.extractLsb' 0 8 rel)
-  let _t1 <- TRDC_MGR.offset_TRDC_CR self
+  let _t1 <- self.offset_TRDC_CR
   pure (((BitVec.extractLsb' 0 2 o) == 0#2) && (((o == _t1) || ((((BitVec.ule TRDC_MGR.MRC_BASE o) && (BitVec.ult rel 0x100#17)) && (BitVec.ule 0x20#8 low_byte)) && (BitVec.ule low_byte 0x3f#8))) || ((((BitVec.ule TRDC_MGR.MRC_BASE o) && (BitVec.ult rel 0x1000#17)) && (BitVec.ule 0x40#8 low_byte)) && (BitVec.ule low_byte 0xbf#8))))
 
-def TRDC_MGR.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MGRRef.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MGRRef S) (r : Request) : M Reply := do
   let o32 : (BitVec 32) := (r.address - TRDC_MGR.BASE_ADDRESS)
   let o : (BitVec 17) := (BitVec.extractLsb' 0 17 o32)
-  let _t1 <- TRDC_MGR.is_register self o
+  let _t1 <- self.is_register o
   let _t5 : Reply <-
     if (!_t1) then do
       let _t2 <- SockeyeMonad.any Reply
@@ -516,29 +551,29 @@ def TRDC_MGR.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     else do
       let _t4 : Reply <-
         if (r.mode == AccessMode.write) then do
-          (self._lens.compose TRDC_MGRState.lens_raw_regs).storeM (BitVec.extractLsb' 2 15 o) r.value
+          self.raw_regs.store (BitVec.extractLsb' 2 15 o) r.value
           pure ({ ok := true, value := 0#32 } : Reply)
         else do
-          let _t3 <- TRDC_MGR.read32bit_reg self o
+          let _t3 <- self.read32bit_reg o
           pure ({ ok := true, value := _t3 } : Reply)
       pure _t4
   pure _t5
 
-def TRDC_MGR.reset {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MGRRef.reset {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MGRRef S) : M Unit := do
-  (self._lens.compose TRDC_MGRState.lens_raw_regs).setM ((fun _ => 0#32) : (Vec 15 (BitVec 32)))
+  self.raw_regs.set ((fun _ => 0#32) : (Vec 15 (BitVec 32)))
   pure ()
 
 -- Module TRDC_MRC
 
-def TRDC_MRC.is_region_hit {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MRCRef.is_region_hit {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MRCRef S) (r : Request) (w0 : (BitVec 32)) (w1 : (BitVec 32)) : M Bool := do
   let start_addr : (BitVec 32) := ((BitVec.extractLsb' 14 18 w0) ++ 0#14)
   let end_addr : (BitVec 32) := ((BitVec.extractLsb' 14 18 w1) ++ 0x3fff#14)
   let valid : Bool := (BitVec.getLsbD w1 0)
   pure ((valid && (BitVec.ule start_addr r.address)) && (BitVec.ule r.address end_addr))
 
-def TRDC_MRC.is_allowed_by_glbac {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MRCRef.is_allowed_by_glbac {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MRCRef S) (r : Request) (glbac : (BitVec 32)) : M Bool := do
   let _t1 : Bool := match r.mode with
       | AccessMode.read => (BitVec.getLsbD glbac 2)
@@ -546,41 +581,41 @@ def TRDC_MRC.is_allowed_by_glbac {S : Type} {M : Type -> Type} [SockeyeMonad S M
       | AccessMode.execute => (BitVec.getLsbD glbac 0)
   pure _t1
 
-def TRDC_MRC.is_access_allowed_by_region {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MRCRef.is_access_allowed_by_region {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MRCRef S) (r : Request) (w0 : (BitVec 32)) : M Bool := do
   let mracsel : (BitVec 3) := (BitVec.extractLsb' 0 3 w0)
-  let glbac : (BitVec 32) <- TRDC_MGR.get_MRC0_GLBACn self.trdc_mgr (0#14 ++ mracsel)
-  TRDC_MRC.is_allowed_by_glbac self r glbac
+  let glbac : (BitVec 32) <- self.trdc_mgr.get_MRC0_GLBACn (0#14 ++ mracsel)
+  self.is_allowed_by_glbac r glbac
 
-def TRDC_MRC.is_access_allowed {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MRCRef.is_access_allowed {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MRCRef S) (r : Request) : M Bool := do
   let d : (BitVec 17) := (0#13 ++ r.domain_id)
-  let r0_w0 : (BitVec 32) <- TRDC_MGR.get_MRC0_DOMd_RGDr_Ww self.trdc_mgr d 0#17 0#17
-  let r1_w0 : (BitVec 32) <- TRDC_MGR.get_MRC0_DOMd_RGDr_Ww self.trdc_mgr d 1#17 0#17
-  let r2_w0 : (BitVec 32) <- TRDC_MGR.get_MRC0_DOMd_RGDr_Ww self.trdc_mgr d 2#17 0#17
-  let r3_w0 : (BitVec 32) <- TRDC_MGR.get_MRC0_DOMd_RGDr_Ww self.trdc_mgr d 3#17 0#17
-  let r0_w1 : (BitVec 32) <- TRDC_MGR.get_MRC0_DOMd_RGDr_Ww self.trdc_mgr d 0#17 1#17
-  let r1_w1 : (BitVec 32) <- TRDC_MGR.get_MRC0_DOMd_RGDr_Ww self.trdc_mgr d 1#17 1#17
-  let r2_w1 : (BitVec 32) <- TRDC_MGR.get_MRC0_DOMd_RGDr_Ww self.trdc_mgr d 2#17 1#17
-  let r3_w1 : (BitVec 32) <- TRDC_MGR.get_MRC0_DOMd_RGDr_Ww self.trdc_mgr d 3#17 1#17
-  let r0_hit : Bool <- TRDC_MRC.is_region_hit self r r0_w0 r0_w1
-  let r1_hit : Bool <- TRDC_MRC.is_region_hit self r r1_w0 r1_w1
-  let r2_hit : Bool <- TRDC_MRC.is_region_hit self r r2_w0 r2_w1
-  let r3_hit : Bool <- TRDC_MRC.is_region_hit self r r3_w0 r3_w1
+  let r0_w0 : (BitVec 32) <- self.trdc_mgr.get_MRC0_DOMd_RGDr_Ww d 0#17 0#17
+  let r1_w0 : (BitVec 32) <- self.trdc_mgr.get_MRC0_DOMd_RGDr_Ww d 1#17 0#17
+  let r2_w0 : (BitVec 32) <- self.trdc_mgr.get_MRC0_DOMd_RGDr_Ww d 2#17 0#17
+  let r3_w0 : (BitVec 32) <- self.trdc_mgr.get_MRC0_DOMd_RGDr_Ww d 3#17 0#17
+  let r0_w1 : (BitVec 32) <- self.trdc_mgr.get_MRC0_DOMd_RGDr_Ww d 0#17 1#17
+  let r1_w1 : (BitVec 32) <- self.trdc_mgr.get_MRC0_DOMd_RGDr_Ww d 1#17 1#17
+  let r2_w1 : (BitVec 32) <- self.trdc_mgr.get_MRC0_DOMd_RGDr_Ww d 2#17 1#17
+  let r3_w1 : (BitVec 32) <- self.trdc_mgr.get_MRC0_DOMd_RGDr_Ww d 3#17 1#17
+  let r0_hit : Bool <- self.is_region_hit r r0_w0 r0_w1
+  let r1_hit : Bool <- self.is_region_hit r r1_w0 r1_w1
+  let r2_hit : Bool <- self.is_region_hit r r2_w0 r2_w1
+  let r3_hit : Bool <- self.is_region_hit r r3_w0 r3_w1
   let any_hit : Bool := (((r0_hit || r1_hit) || r2_hit) || r3_hit)
-  let _t13 <- TRDC_MRC.is_access_allowed_by_region self r r0_w0
-  let _t14 <- TRDC_MRC.is_access_allowed_by_region self r r1_w0
-  let _t15 <- TRDC_MRC.is_access_allowed_by_region self r r2_w0
-  let _t16 <- TRDC_MRC.is_access_allowed_by_region self r r3_w0
+  let _t13 <- self.is_access_allowed_by_region r r0_w0
+  let _t14 <- self.is_access_allowed_by_region r r1_w0
+  let _t15 <- self.is_access_allowed_by_region r r2_w0
+  let _t16 <- self.is_access_allowed_by_region r r3_w0
   pure ((((any_hit && (!r0_hit || _t13)) && (!r1_hit || _t14)) && (!r2_hit || _t15)) && (!r3_hit || _t16))
 
-def TRDC_MRC.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def TRDC_MRCRef.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : TRDC_MRCRef S) (r : Request) : M Reply := do
-  let trdc_cr : (BitVec 32) <- TRDC_MGR.get_TRDC_CR self.trdc_mgr
+  let trdc_cr : (BitVec 32) <- self.trdc_mgr.get_TRDC_CR
   let gvldr : Bool := (BitVec.getLsbD trdc_cr 15)
   let allowed : Bool <-
     if gvldr then do
-      TRDC_MRC.is_access_allowed self r
+      self.is_access_allowed r
     else do
       pure (r.domain_id == TRDC_MRC.ALLOWED_DEFAULT_DID)
   let _t6 : Reply <-
@@ -593,7 +628,7 @@ def TRDC_MRC.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
 
 -- Module AnyRequestCpu
 
-def AnyRequestCpu.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def AnyRequestCpuRef.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : AnyRequestCpuRef S) : M Unit := do
   let _t1 <- SockeyeMonad.any Request
   let ignored : Reply <- self.downstream.request ({ _t1 with domain_id := CPU_DOMAIN_ID } : Request)
@@ -601,7 +636,7 @@ def AnyRequestCpu.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
 
 -- Module Usb
 
-def Usb.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def UsbRef.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : UsbRef S) : M Unit := do
   let _t1 <- SockeyeMonad.any Request
   let ignored : Reply <- self.downstream.request ({ _t1 with domain_id := USB_DOMAIN_ID } : Request)
@@ -609,7 +644,7 @@ def Usb.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
 
 -- Module Interconnect
 
-def Interconnect.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def InterconnectRef.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : InterconnectRef S) (r : Request) : M Reply := do
   let a : (BitVec 32) := r.address
   let _t9 : Reply <-
@@ -638,132 +673,132 @@ def Interconnect.request {S : Type} {M : Type -> Type} [SockeyeMonad S M]
 
 -- Module System
 
-def System.reset {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def SystemRef.reset {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : SystemRef S) : M Unit := do
-  TRDC_MGR.reset self.trdc_mgr
+  self.trdc_mgr.reset
   pure ()
 
-def System.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def SystemRef.step {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : SystemRef S) : M Unit := do
   let _t1 <- SockeyeMonad.any Bool
   if _t1 then do
     self.cpu.step
     pure ()
   else do
-    Usb.step self.usb
+    self.usb.step
     pure ()
   pure ()
 
 -- Module Main
 
-def Main.cpu_write {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.cpu_write {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) (a : PhysAddr) (v : (BitVec 32)) : M Unit := do
-  let reply : Reply <- Interconnect.request self.system.interconnect ({ address := a, value := v, mode := AccessMode.write, domain_id := CPU_DOMAIN_ID } : Request)
+  let reply : Reply <- self.system.interconnect.request ({ address := a, value := v, mode := AccessMode.write, domain_id := CPU_DOMAIN_ID } : Request)
   SockeyeMonad.assert reply.ok "reply.ok"
   pure ()
 
-def Main.reg_addr {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.reg_addr {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) (o : RegisterOffset) : M PhysAddr := do
   pure (0x49010000#32 + (0#15 ++ o))
 
-def Main.set_region {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.set_region {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) (d : DomainID) (r : RegisterOffset) (first : PhysAddr) (last : PhysAddr) (mracsel : (BitVec 3)) : M Unit := do
   let d17 : (BitVec 17) := (0#13 ++ d)
-  let _t1 <- TRDC_MGR.offset_MRC0_DOMd_RGDr_Ww self.system.trdc_mgr d17 r 0#17
-  let _t2 <- Main.reg_addr self _t1
-  Main.cpu_write self _t2 ((first &&& 0xffffc000#32) ||| (0#29 ++ mracsel))
-  let _t3 <- TRDC_MGR.offset_MRC0_DOMd_RGDr_Ww self.system.trdc_mgr d17 r 1#17
-  let _t4 <- Main.reg_addr self _t3
-  Main.cpu_write self _t4 ((last &&& 0xffffc000#32) ||| 0x1#32)
+  let _t1 <- self.system.trdc_mgr.offset_MRC0_DOMd_RGDr_Ww d17 r 0#17
+  let _t2 <- self.reg_addr _t1
+  self.cpu_write _t2 ((first &&& 0xffffc000#32) ||| (0#29 ++ mracsel))
+  let _t3 <- self.system.trdc_mgr.offset_MRC0_DOMd_RGDr_Ww d17 r 1#17
+  let _t4 <- self.reg_addr _t3
+  self.cpu_write _t4 ((last &&& 0xffffc000#32) ||| 0x1#32)
   pure ()
 
-def Main.common_config {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.common_config {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  let _t1 <- TRDC_MGR.offset_MRC0_GLBACn self.system.trdc_mgr 0#17
-  let _t2 <- Main.reg_addr self _t1
-  Main.cpu_write self _t2 0x7#32
-  let _t3 <- TRDC_MGR.offset_MRC0_GLBACn self.system.trdc_mgr 1#17
-  let _t4 <- Main.reg_addr self _t3
-  Main.cpu_write self _t4 0x6#32
-  Main.set_region self CPU_DOMAIN_ID 0#17 0x80000000#32 0xffffffff#32 0#3
+  let _t1 <- self.system.trdc_mgr.offset_MRC0_GLBACn 0#17
+  let _t2 <- self.reg_addr _t1
+  self.cpu_write _t2 0x7#32
+  let _t3 <- self.system.trdc_mgr.offset_MRC0_GLBACn 1#17
+  let _t4 <- self.reg_addr _t3
+  self.cpu_write _t4 0x6#32
+  self.set_region CPU_DOMAIN_ID 0#17 0x80000000#32 0xffffffff#32 0#3
   pure ()
 
-def Main.enable_trdc {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.enable_trdc {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  let _t1 <- TRDC_MGR.offset_TRDC_CR self.system.trdc_mgr
-  let _t2 <- Main.reg_addr self _t1
-  Main.cpu_write self _t2 0x8000#32
+  let _t1 <- self.system.trdc_mgr.offset_TRDC_CR
+  let _t2 <- self.reg_addr _t1
+  self.cpu_write _t2 0x8000#32
   pure ()
 
-def Main.good_config {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.good_config {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  Main.common_config self
-  Main.set_region self USB_DOMAIN_ID 0#17 Main.DMA_FIRST Main.DMA_LAST 1#3
-  Main.enable_trdc self
+  self.common_config
+  self.set_region USB_DOMAIN_ID 0#17 Main.DMA_FIRST Main.DMA_LAST 1#3
+  self.enable_trdc
   pure ()
 
-def Main.bad_config {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.bad_config {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  Main.common_config self
-  Main.set_region self USB_DOMAIN_ID 0#17 0x80000000#32 0xffffffff#32 1#3
-  Main.enable_trdc self
+  self.common_config
+  self.set_region USB_DOMAIN_ID 0#17 0x80000000#32 0xffffffff#32 1#3
+  self.enable_trdc
   pure ()
 
-def Main.check_linux_protected {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.check_linux_protected {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  let old : (Vec 31 (BitVec 8)) <- (self.system.dram._lens.compose DramState.lens_backing).getM
-  Usb.step self.system.usb
-  let new : (Vec 31 (BitVec 8)) <- (self.system.dram._lens.compose DramState.lens_backing).getM
+  let old : (Vec 31 (BitVec 8)) <- self.system.dram.backing.get
+  self.system.usb.step
+  let new : (Vec 31 (BitVec 8)) <- self.system.dram.backing.get
   let addr : (BitVec 31) <- SockeyeMonad.any (BitVec 31)
   SockeyeMonad.assume (BitVec.ule addr 0xfffffff#31) "addr <= 0x0FFF_FFFFu31"
   SockeyeMonad.assert ((old addr) == (new addr)) "old[addr] == new[addr]"
   pure ()
 
-def Main.test_good_config {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.test_good_config {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  System.reset self.system
-  Main.good_config self
-  Main.check_linux_protected self
+  self.system.reset
+  self.good_config
+  self.check_linux_protected
   pure ()
 
-def Main.test_bad_config {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.test_bad_config {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  System.reset self.system
-  Main.bad_config self
-  Main.check_linux_protected self
+  self.system.reset
+  self.bad_config
+  self.check_linux_protected
   pure ()
 
-def Main.test_reset {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.test_reset {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  System.reset self.system
-  Main.check_linux_protected self
+  self.system.reset
+  self.check_linux_protected
   pure ()
 
-def Main.rogue_usb_write {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.rogue_usb_write {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) (a : PhysAddr) : M Unit := do
-  let ignored : Reply <- Interconnect.request self.system.interconnect ({ address := a, value := 0xdeadbeef#32, mode := AccessMode.write, domain_id := USB_DOMAIN_ID } : Request)
+  let ignored : Reply <- self.system.interconnect.request ({ address := a, value := 0xdeadbeef#32, mode := AccessMode.write, domain_id := USB_DOMAIN_ID } : Request)
   pure ()
 
-def Main.check_linux_protected_from_one_write {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.check_linux_protected_from_one_write {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  let old : (BitVec 8) <- (self.system.dram._lens.compose DramState.lens_backing).loadM 0x1000#31
-  Main.rogue_usb_write self 0x80001000#32
-  let new : (BitVec 8) <- (self.system.dram._lens.compose DramState.lens_backing).loadM 0x1000#31
+  let old : (BitVec 8) <- self.system.dram.backing.load 0x1000#31
+  self.rogue_usb_write 0x80001000#32
+  let new : (BitVec 8) <- self.system.dram.backing.load 0x1000#31
   SockeyeMonad.assert (old == new) "old == new"
   pure ()
 
-def Main.test_good_config_one_write {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.test_good_config_one_write {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  System.reset self.system
-  Main.good_config self
-  Main.check_linux_protected_from_one_write self
+  self.system.reset
+  self.good_config
+  self.check_linux_protected_from_one_write
   pure ()
 
-def Main.test_bad_config_one_write {S : Type} {M : Type -> Type} [SockeyeMonad S M]
+def MainRef.test_bad_config_one_write {S : Type} {M : Type -> Type} [SockeyeMonad S M]
     (self : MainRef S) : M Unit := do
-  System.reset self.system
-  Main.bad_config self
-  Main.check_linux_protected_from_one_write self
+  self.system.reset
+  self.bad_config
+  self.check_linux_protected_from_one_write
   pure ()
 
 
@@ -771,31 +806,33 @@ def Main.test_bad_config_one_write {S : Type} {M : Type -> Type} [SockeyeMonad S
 
 def Instances.main.system.dram {S : Type} (root : Lens S MainState) : DramRef S where
   _lens := ((root.compose MainState.lens_system).compose SystemState.lens_dram)
+  backing := { _lens := (((root.compose MainState.lens_system).compose SystemState.lens_dram).compose DramState.lens_backing) }
 
 def Instances.main.system.usb_regs {S : Type} (root : Lens S MainState) : GenericSinkRef S where
   _lens := ((root.compose MainState.lens_system).compose SystemState.lens_usb_regs)
 
 def Instances.main.system.trdc_mgr {S : Type} (root : Lens S MainState) : TRDC_MGRRef S where
   _lens := ((root.compose MainState.lens_system).compose SystemState.lens_trdc_mgr)
+  raw_regs := { _lens := (((root.compose MainState.lens_system).compose SystemState.lens_trdc_mgr).compose TRDC_MGRState.lens_raw_regs) }
 
 def Instances.main.system.mrc {S : Type} (root : Lens S MainState) : TRDC_MRCRef S where
   _lens := ((root.compose MainState.lens_system).compose SystemState.lens_mrc)
   trdc_mgr := (Instances.main.system.trdc_mgr root)
-  target := { request := Dram.request (Instances.main.system.dram root) }
+  target := { request := DramRef.request (Instances.main.system.dram root) }
 
 def Instances.main.system.interconnect {S : Type} (root : Lens S MainState) : InterconnectRef S where
   _lens := ((root.compose MainState.lens_system).compose SystemState.lens_interconnect)
-  dram_protected_by_mrc := { request := TRDC_MRC.request (Instances.main.system.mrc root) }
-  usb_regs := { request := GenericSink.request (Instances.main.system.usb_regs root) }
-  trdc_mgr := { request := TRDC_MGR.request (Instances.main.system.trdc_mgr root) }
+  dram_protected_by_mrc := { request := TRDC_MRCRef.request (Instances.main.system.mrc root) }
+  usb_regs := { request := GenericSinkRef.request (Instances.main.system.usb_regs root) }
+  trdc_mgr := { request := TRDC_MGRRef.request (Instances.main.system.trdc_mgr root) }
 
 def Instances.main.system.usb {S : Type} (root : Lens S MainState) : UsbRef S where
   _lens := ((root.compose MainState.lens_system).compose SystemState.lens_usb)
-  downstream := { request := Interconnect.request (Instances.main.system.interconnect root) }
+  downstream := { request := InterconnectRef.request (Instances.main.system.interconnect root) }
 
 def Instances.main.cpu {S : Type} (root : Lens S MainState) : AnyRequestCpuRef S where
   _lens := (root.compose MainState.lens_cpu)
-  downstream := { request := Interconnect.request (Instances.main.system.interconnect root) }
+  downstream := { request := InterconnectRef.request (Instances.main.system.interconnect root) }
 
 def Instances.main.system {S : Type} (root : Lens S MainState) : SystemRef S where
   _lens := (root.compose MainState.lens_system)
@@ -805,7 +842,7 @@ def Instances.main.system {S : Type} (root : Lens S MainState) : SystemRef S whe
   mrc := (Instances.main.system.mrc root)
   interconnect := (Instances.main.system.interconnect root)
   usb := (Instances.main.system.usb root)
-  cpu := { step := AnyRequestCpu.step (Instances.main.cpu root) }
+  cpu := { step := AnyRequestCpuRef.step (Instances.main.cpu root) }
 
 def Instances.main {S : Type} (root : Lens S MainState) : MainRef S where
   _lens := root
