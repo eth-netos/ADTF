@@ -248,6 +248,13 @@ def ExecM.run {S A : Type} (m : ExecM S A) (seed : Nat) (st : S) : Prod (ExecRes
   let (res, _, finalSt) := m { current := UInt64.ofNat seed } st
   (res, finalSt)
 
+/-- Runs a scenario, i.e. a function of the top-level module without parameters, with `self` as
+the reference `R` to the top-level instance, from state `init`, and returns how the run ended.
+`R` can be in a higher universe, because a `Ref` that holds implementations of interfaces is. -/
+def runScenario {S : Type} {R : Type _} (scenario : R -> ExecM S Unit) (self : R) (init : S)
+    (seed : Nat := 0) : ExecResult Unit :=
+  (ExecM.run (scenario self) seed init).1
+
 instance (S : Type) : Monad (ExecM S) where
   pure a := fun seed s => (ExecResult.success a, seed, s)
   bind m f := fun seed s =>
@@ -765,13 +772,13 @@ def MainRef.check_linux_protected_from_one_write (self : MainRef S) : M Unit := 
   SockeyeMonad.assert (old == new) "old == new"
   pure ()
 
-def MainRef.test_good_config_one_write (self : MainRef S) : M Unit := do
+def MainRef.test_good_config_one_write_succeeds (self : MainRef S) : M Unit := do
   self.system.reset
   self.good_config
   self.check_linux_protected_from_one_write
   pure ()
 
-def MainRef.test_bad_config_one_write (self : MainRef S) : M Unit := do
+def MainRef.test_bad_config_one_write_fails (self : MainRef S) : M Unit := do
   self.system.reset
   self.bad_config
   self.check_linux_protected_from_one_write
@@ -826,3 +833,18 @@ def Instances.main {S : Type} (root : Lens S MainState) : MainRef S where
   system := (Instances.main.system root)
   cpu := (Instances.main.cpu root)
 
+
+/-! ## Tests: scenarios of `Main` -/
+
+/-- Runs a scenario of `Main` from the default initial state. -/
+def Main.runScenario (scenario : MainRef MainState -> ExecM MainState Unit)
+    (seed : Nat := 0) : ExecResult Unit :=
+  _root_.runScenario scenario (Instances.main Lens.id) {} seed
+
+/-- info: ExecResult.success () -/
+#guard_msgs in
+#eval Main.runScenario MainRef.test_good_config_one_write_succeeds
+
+/-- info: ExecResult.assertionFailed -/
+#guard_msgs (substring := true) in
+#eval Main.runScenario MainRef.test_bad_config_one_write_fails
