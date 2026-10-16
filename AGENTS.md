@@ -4,6 +4,14 @@ Do not write code comments that just narrate what's already clear from the code.
 Do not write comments that read like a response to a particular prompt. Instead, make sure each comment makes sense on its own.
 If the name of a definition contains an abbreviation, expand the abbreviation in a doc comment.
 
+## Distinguish between code generators, agents, and humans
+
+When talking about what you are doing, remember that you are an agent, and use terminology accordingly.
+You are not a human. You do not have hands, so you cannot create handwritten code, and "manual" comes from the Latin word "manus", meaning "hand", so you also cannot produce any "manually written code" etc.
+Sometimes you write code generators, and you need to distinguish between code produced by the code generator and code that cannot be produced by the code generator.
+Instead of "hand-written code" or "manually written code", say "code that cannot be produced by the code generator".
+Other phrases that are safe to use: "code produced by a code generator", "code produced by the xyz backend", "agent-written code".
+
 ## Code formatting
 
 When you start a new file, make its lines at most 80 characters wide.
