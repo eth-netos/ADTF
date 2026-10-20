@@ -56,7 +56,7 @@ Do not try to imitate the git commit message format of previous commits. Instead
 * An empty line
 * A brief summary of what you did, wrapped at 72 chars, at most 12 lines long
 * An empty line
-* How much wall-clock time it took you to solve the task of this commit, on a line in `Time spent: %Hh %Mmin %Ss` format. Before starting a new task, record the current time, and before committing, calculate the difference using a tool.
+* How much wall-clock time it took you to solve the task of this commit, on a line in `Time spent (excl initial prompt reading and final summary): %Hh %Mmin %Ss` format. Before starting a new task, record the current time, and before committing, calculate the difference using a tool.
 * An empty line
 * A Co-authored-by trailer where you credit yourself, including the model name and model version number
 
