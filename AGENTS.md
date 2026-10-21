@@ -50,7 +50,7 @@ Do not try to imitate the git commit message format of previous commits. Instead
 * An empty line as per git conventions
 * A line `Prompt:`
 * An empty line
-* The prompt, verbatim, but wrapped at 72 chars. If several tasks were given in one prompt and the user asked for separate commits, only include the prompot of the current task.
+* The prompt, verbatim, but wrapped at 72 chars. If several tasks were given in one prompt and the user asked for separate commits, only include the prompot of the current task. If the current commit is the result of several prompts, include all of them.
 * An empty line
 * A line `Outcome:`
 * An empty line
