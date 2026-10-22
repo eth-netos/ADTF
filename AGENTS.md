@@ -50,16 +50,16 @@ Do not try to imitate the git commit message format of previous commits. Instead
 * An empty line as per git conventions
 * A line `Prompt:`
 * An empty line
-* The prompt, verbatim, but wrapped at 72 chars. If several tasks were given in one prompt and the user asked for separate commits, only include the prompot of the current task. If the current commit is the result of several prompts, include all of them.
-* An empty line
+* The prompt, verbatim, but wrapped at 72 chars. If several tasks were given in one prompt and the user asked for separate commits, only include the prompt of the current task. If the current commit is the result of several prompts, include all of them, and add a line `Prompt:` and an empty line before each prompt. Also add an empty line after each prompt
 * A line `Outcome:`
 * An empty line
 * A brief summary of what you did, wrapped at 72 chars, at most 12 lines long
 * An empty line
-* How much wall-clock time it took you to solve the task of this commit, on a line in `Time spent (excl initial prompt reading and final summary): %Hh %Mmin %Ss` format. Before starting a new task, record the current time, and before committing, calculate the difference using a tool.
+* How much wall-clock time it took you to solve the task of this commit, on a line in `Time spent (excl initial prompt reading & final summary): %Hh %Mmin %Ss` format. Before starting a new task, record the current time, and before committing, calculate the difference using a tool.
 * An empty line
 * A Co-authored-by trailer where you credit yourself, including the model name and model version number
 
 ### git submodules
 
 Before committing, read `git status` to know what's going on, and pay attention to the submodules. If the changes you are about to commit depend on the contents of submodules, first make the necessary submodule commit(s). Then, in the parent repo, there should be no more "modified content" status, but maybe some "new commits" status for submodules. Also `git add` the submodules with changes relevant for the current commit, so that it is always clear from the git history against what submodule contents the parent's code was tested.
+If a task only made changes in a submodule and the only change in the parent module is that the hash of the submodule changed, do not make a commit in the parent module.
