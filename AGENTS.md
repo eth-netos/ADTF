@@ -37,6 +37,10 @@ When checking the output of build commands, do not only check for success/failur
 
 Before committing, run `cargo build --all-targets` and use cargo to run those test files that you think matter for the changes you made.
 
+## Cross-language style guide
+
+**Tuples:** Use destructuring syntax instead of generic numbered accessors if it makes the code shorter or more readable. For instance, in Lean, instead of `(fun foo_and_bar => foo_and_bar.1 + foo_and_bar.2)`, write `(fun (foo, bar) => foo + bar)`.
+
 ## git
 
 Creating a pretty git history is *not* a goal in this project. The goal is to create an *accurate* history that includes everything that was tried, including failed experiments.
