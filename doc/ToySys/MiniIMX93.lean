@@ -6,17 +6,21 @@ set_option relaxedAutoImplicit false
 /-!
 # Sockeye prelude
 
-Definitions shared by all Lean files emitted by Sockeye's Lean backend (`sockeye -b lean`). The
-backend pastes this file at the top of each file that it emits.
+Definitions shared by all Lean files emitted by Sockeye's Lean backend
+(`sockeye -b lean`). With `--lean-prelude import`, each emitted file imports
+this module, and with `--lean-prelude inline`, the backend pastes this file at
+the top of each file that it emits.
 
-Translated Sockeye functions are generic over a monad `M` with a `SockeyeMonad S M` instance, where
-`S` is the state of the whole system. There are two such monads:
-* `SpecM S`, weakest preconditions, for proving,
-* `ExecM S`, for running, where `any` draws from a pseudo-random number generator.
+Translated Sockeye functions return `SockeyeEffects S A`, the tree of the
+effects of a computation with answer `A`, where `S` is the state of the whole
+system. It has two interpreters:
+* `SockeyeEffects.wp`, weakest preconditions, for proving,
+* `SockeyeEffects.eval`, for running, where `any` gets its values from a
+  `NondetSource`.
 
-Type parameters are named by single letters, which stand for: `S` the state, `M` the monad, `A`
-the answer (result) of a computation, `P` (and `Q`) a part of the state, `V` the values in a
-vector.
+Type parameters are named by single letters, which stand for: `S` the state, `A`
+(and `B`) the answer (result) of a computation, `P` (and `Q`) a part of the
+state, `V` the values in a vector.
 -/
 
 /-! ## Pseudo-random values for `any` -/
@@ -26,7 +30,8 @@ structure PRNGState where
   current : UInt64
   deriving Repr
 
-/-- The 64 pseudo-random bits of this state (the output function of splitmix64). -/
+/-- The 64 pseudo-random bits of this state (the output function of
+splitmix64). -/
 def PRNGState.bits (s : PRNGState) : UInt64 :=
   let z := s.current
   let z := (z ^^^ (z >>> 30)) * 0xBF58476D1CE4E5B9
@@ -36,54 +41,40 @@ def PRNGState.bits (s : PRNGState) : UInt64 :=
 def PRNGState.next (s : PRNGState) : PRNGState :=
   { current := s.current + 0x9E3779B97F4A7C15 }
 
-/-- Types `A` of which `ExecM` can pick a pseudo-random value (`Val`). -/
-class RandomVal (A : Type) where
-  randomVal : PRNGState -> Prod A PRNGState
-
-instance : RandomVal Unit where
-  randomVal s := ((), s)
-
-instance : RandomVal Bool where
-  randomVal s := (s.bits % 2 == 0, s.next)
-
-instance : RandomVal UInt64 where
-  randomVal s := (s.bits, s.next)
-
-/-- An unbounded Sockeye `Int`; only 64 bits of it are random. -/
-instance : RandomVal Nat where
-  randomVal s := (s.bits.toNat, s.next)
-
 /-- Draws 64 bits at a time until `n` bits are filled. -/
-def randomBits : (n : Nat) -> PRNGState -> Prod Nat PRNGState
+def randomBits : (n : Nat) -> PRNGState -> Nat × PRNGState
   | 0, s => (0, s)
   | n + 1, s =>
     let (hi, s') := randomBits (n + 1 - 64) s.next
     (hi * 2 ^ 64 + s.bits.toNat, s')
 
-instance (n : Nat) : RandomVal (BitVec n) where
-  randomVal s :=
-    let (v, s') := randomBits n s
-    (BitVec.ofNat n v, s')
+/-! ## Comparisons of bit vectors -/
+
+/-- `x > y` on unsigned bit vectors. Unlike `BitVec.ult y x`, it lists the
+operands in the order in which Sockeye evaluates them, so their nested
+actions `(<- m)` run in that order. -/
+@[simp] def BitVec.ugt {n : Nat} (x y : BitVec n) : Bool := BitVec.ult y x
+
+/-- `x >= y` on unsigned bit vectors, see `BitVec.ugt`. -/
+@[simp] def BitVec.uge {n : Nat} (x y : BitVec n) : Bool := BitVec.ule y x
 
 /-! ## Vectors and arrays -/
 
-/-- A Sockeye `Vec(V, 2^n)`, a vector of `2^n` values of type `V`, indexed by `n`-bit numbers.
-The contents of an `Array<BitInt(n), V>` are such a vector too. -/
+/-- A Sockeye `Vec(V, 2^n)`, a vector of `2^n` values of type `V`, indexed by
+`n`-bit numbers. The contents of an `Array<BitInt(n), V>` are such a vector
+too. -/
 def Vec (n : Nat) (V : Type) := BitVec n -> V
 
-instance (n : Nat) (V : Type) [Inhabited V] : Inhabited (Vec n V) where
-  default := fun _ => default
+/-- The elements of a vector in index order, e.g. `[1#8, 2#8]`. -/
+instance (n : Nat) (V : Type) [Repr V] : Repr (Vec n V) where
+  reprPrec v _ := repr ((List.range (2 ^ n)).map fun i => v (BitVec.ofNat n i))
 
-/-- A pseudo-random vector, as needed for `any` of a Sockeye `Vec`: each element is drawn from a
-state that depends on the current state and on the index. -/
-instance (n : Nat) (V : Type) [RandomVal V] : RandomVal (Vec n V) where
-  randomVal s :=
-    ((fun i => (RandomVal.randomVal (A := V)
-        { current := s.bits + 0x9E3779B97F4A7C15 * (UInt64.ofNat i.toNat + 1) }).1 : Vec n V),
-     s.next)
+/-- v[i] -/
+def Vec.get {n : Nat} {V : Type} (v : Vec n V) (i : BitVec n) : V := v i
 
 /-- `v[i := x]`. -/
-def Vec.set {n : Nat} {V : Type} (v : Vec n V) (i : BitVec n) (x : V) : Vec n V :=
+def Vec.set {n : Nat} {V : Type} (v : Vec n V) (i : BitVec n) (x : V) :
+    Vec n V :=
   fun j => if j = i then x else v j
 
 /-- `lo ++ hi`. -/
@@ -94,28 +85,333 @@ def Vec.concat {n : Nat} {V : Type} (lo hi : Vec n V) : Vec (n + 1) V :=
 def Vec.slice {n k : Nat} {V : Type} (v : Vec n V) (idx : BitVec n) : Vec k V :=
   fun i => v (i.setWidth n + idx)
 
-/-- Whether a slice of `2^k` elements starting at `lo` fits into a vector of `2^n` elements. -/
+/-- Whether a slice of `2^k` elements starting at `lo` fits into a vector of
+`2^n` elements. -/
 def Vec.sliceInBounds (n k : Nat) (lo : BitVec n) : Bool :=
   lo.toNat + 2 ^ k <= 2 ^ n
 
 /-- `v[lo.. := w]`. -/
-def Vec.sliceSet {n k : Nat} {V : Type} (v : Vec n V) (lo : BitVec n) (w : Vec k V) : Vec n V :=
-  fun i => if lo <= i /\ (i - lo).toNat < 2 ^ k then w ((i - lo).setWidth k) else v i
+def Vec.sliceSet {n k : Nat} {V : Type} (v : Vec n V) (lo : BitVec n)
+    (w : Vec k V) : Vec n V :=
+  fun i =>
+    if lo <= i /\ (i - lo).toNat < 2 ^ k then w ((i - lo).setWidth k) else v i
 
 /-- Stores `x` at all indices from `lo` to `hi`, both inclusive. -/
-def Vec.setRange {n : Nat} {V : Type} (v : Vec n V) (lo hi : BitVec n) (x : V) : Vec n V :=
+def Vec.setRange {n : Nat} {V : Type} (v : Vec n V) (lo hi : BitVec n)
+    (x : V) : Vec n V :=
   fun i => if lo <= i /\ i <= hi then x else v i
 
-/-! ## The monad interface -/
+/-- Repeat the value `v` `2^n` times. -/
+def Vec.repeat {V : Type} (v : V) (n : Nat) : Vec n V := fun _i => v
 
-/-- What translated Sockeye code needs from a monad `M`, where `S` is the state of the whole
-system. `code` is the Sockeye source text of the condition. -/
-class SockeyeMonad (S : outParam Type) (M : Type -> Type) extends Monad M where
-  getState : M S
-  setState : S -> M Unit
-  any (A : Type) [RandomVal A] : M A
-  assert (cond : Bool) (code : String) : M Unit
-  assume (cond : Bool) (code : String) : M Unit
+/-- Prepends `2^n` (a power of 2) arrows `V ->` to `R`, the type of a function
+that takes `2^n` arguments of type `V` and returns an `R`. -/
+def prepend_pow2_arrows (V : Type) (n : Nat) (R : Type) : Type :=
+  match n with
+  | 0 => V -> R -- 2^0 = 1 so we prepend one "V ->"
+  | m + 1 =>
+    -- We need to prepend 2^(m + 1) times "V -> ".
+    -- 2^(m + 1) = 2 * 2^m, so we just make 2 recursive calls:
+    prepend_pow2_arrows V m (prepend_pow2_arrows V m R)
+
+/-- Takes the `2^n` elements of a vector as separate arguments, in index
+order, and passes the vector to `k`. -/
+def Vec.mkThen {V R : Type} (n : Nat) (k : Vec n V -> R) :
+    prepend_pow2_arrows V n R :=
+  match n with
+  | 0 => fun v => k (fun _dummy_index => v)
+  | m + 1 =>
+    Vec.mkThen m fun lo => Vec.mkThen m fun hi => k (Vec.concat lo hi)
+
+/-- The vector of the `2^n` arguments, in index order, e.g.
+`Vec.mk 1 x0 x1 : Vec 1 V`. -/
+def Vec.mk {V : Type} (n : Nat) : prepend_pow2_arrows V n (Vec n V) :=
+  Vec.mkThen n id
+
+/-- info: [0x0a#8, 0x0b#8, 0x0c#8, 0x0d#8] -/
+#guard_msgs in
+#eval (Vec.mk 2 10#8 11#8 12#8 13#8 : Vec 2 (BitVec 8))
+
+/-! ## Sockeye types
+
+When running Sockeye code, `any<T>` needs to know the type `T` of the value to
+pick. Lean code cannot inspect a Lean type, so `SockeyeType` describes the
+Sockeye type of the value, and `IsSockeyeType T t` says that the Lean type `T`
+is the translation of the Sockeye type `t`. Only `SockeyeEffects.eval` needs
+them: `SockeyeEffects.wp` quantifies over the values of `T` directly. -/
+
+/-- A Sockeye type. Records are described by the types of their fields, and
+enums by the number of their variants, so that `SockeyeType.interp` can give
+each a representation of its own. -/
+inductive SockeyeType where
+  | unit
+  | bool
+  | int
+  | bitInt (n : Nat)
+  /-- An enum whose variants are numbered `0` to `last`. -/
+  | enum (last : Nat)
+  /-- `Vec(elem, 2^n)`. -/
+  | vec (n : Nat) (elem : SockeyeType)
+  /-- A record with fields of these types, in the order of their names. -/
+  | record (fields : List SockeyeType)
+  deriving Repr
+
+mutual
+/-- The representation of values of a Sockeye type, from which
+`IsSockeyeType.construct` makes the value of the translated type: tuples for
+records, and the number of the variant for enums. -/
+def SockeyeType.interp : SockeyeType -> Type
+  | .unit => Unit
+  | .bool => Bool
+  | .int => Nat
+  | .bitInt n => BitVec n
+  | .enum last => Fin (last + 1)
+  | .vec n elem => Vec n elem.interp
+  | .record fields => SockeyeType.interpFields fields
+
+def SockeyeType.interpFields : List SockeyeType -> Type
+  | [] => Unit
+  | t :: ts => t.interp × SockeyeType.interpFields ts
+end
+
+/-- `T` is the translation of the Sockeye type `t`, `construct` makes a `T` from
+its representation, and `destruct` gives the representation of a `T`. The Lean
+backend emits an instance for each record and enum type.
+
+`construct_destruct` says that `construct` reaches every `T`, so that
+`SockeyeEffects.eval`, which passes `construct v` to the continuation of an
+`any` for the value `v` that a source gives, can run it with each value over
+which `SockeyeEffects.wp` quantifies (see `wp_iff_eval` in
+`SockeyeLib.WpEvalConsistency`). -/
+class IsSockeyeType (T : Type) (t : outParam SockeyeType) where
+  construct : t.interp -> T
+  destruct : T -> t.interp
+  construct_destruct : forall x, construct (destruct x) = x
+
+attribute [simp] IsSockeyeType.construct_destruct
+
+instance : IsSockeyeType Unit .unit where
+  construct u := u
+  destruct u := u
+  construct_destruct _ := rfl
+
+instance : IsSockeyeType Bool .bool where
+  construct b := b
+  destruct b := b
+  construct_destruct _ := rfl
+
+/-- An unbounded Sockeye `Int`. -/
+instance : IsSockeyeType Nat .int where
+  construct n := n
+  destruct n := n
+  construct_destruct _ := rfl
+
+instance (n : Nat) : IsSockeyeType (BitVec n) (.bitInt n) where
+  construct b := b
+  destruct b := b
+  construct_destruct _ := rfl
+
+instance (n : Nat) (V : Type) (t : SockeyeType) [IsSockeyeType V t] :
+    IsSockeyeType (Vec n V) (.vec n t) where
+  construct v := fun i => IsSockeyeType.construct (v i)
+  destruct v := fun i => IsSockeyeType.destruct (v i)
+  construct_destruct v :=
+    funext fun i => IsSockeyeType.construct_destruct (v i)
+
+/-! ## Sources of values for `any` -/
+
+/-- A value of some Sockeye type, in its representation. -/
+abbrev NondetValue := (t : SockeyeType) × t.interp
+
+/-- The value `a` of a translated type, in its representation. For a source
+that gives `NondetValue.of a` to an `any` of the type of `a`, the continuation
+of the `any` gets `construct (destruct a)`, which is `a`. -/
+def NondetValue.of {A : Type} {t : SockeyeType} [IsSockeyeType A t] (a : A) :
+    NondetValue :=
+  ⟨t, IsSockeyeType.destruct a⟩
+
+/-- Where `SockeyeEffects.eval` gets the values of `any`s: given how many `any`s
+were evaluated before (so the first `any` is the `0`-th) and the type
+`tExpected` of the value to pick, a value of some type `tActual`. A source may
+ignore `tExpected` and give a value of another type. Then the run ends with
+`ExecResult.illTypedNondetSource`, which, like a failed assumption, does not
+count as a failure of the program: the source, which plays the demon that
+picks the values of the `any`s, did not pick a value of the right type. -/
+def NondetSource := (i : Nat) -> (tExpected : SockeyeType) -> NondetValue
+
+mutual
+/-- A pseudo-random value of type `t`, determined by the state `s`. The fields
+of a record and the elements of a vector are drawn from states that depend on
+`s` and on their position. -/
+def SockeyeType.random : (t : SockeyeType) -> PRNGState -> t.interp
+  | .unit, _ => ()
+  | .bool, s => s.bits % 2 == 0
+  | .int, s => s.bits.toNat
+  | .bitInt n, s => BitVec.ofNat n (randomBits n s).1
+  | .enum last, s => ⟨s.bits.toNat % (last + 1), Nat.mod_lt _ (Nat.succ_pos _)⟩
+  | .vec _ elem, s => fun i =>
+    elem.random
+      { current := s.bits + 0x9E3779B97F4A7C15 * (UInt64.ofNat i.toNat + 1) }
+  | .record fields, s => SockeyeType.randomFields fields s
+
+def SockeyeType.randomFields :
+    (ts : List SockeyeType) -> PRNGState -> SockeyeType.interpFields ts
+  | [], _ => ()
+  | t :: ts, s => (t.random s, SockeyeType.randomFields ts s.next)
+end
+
+/-- The source of pseudo-random values that `seed` determines: the `i`-th `any`
+gets a value of the expected type, drawn from a state that depends on `seed`
+and `i`. -/
+def prngSource (seed : Nat) : NondetSource := fun i t =>
+  ⟨t, t.random
+    { current := (UInt64.ofNat seed) * 0xBF58476D1CE4E5B9 + UInt64.ofNat i }⟩
+
+mutual
+/-- Whether two Sockeye types are equal. (Lean cannot derive `DecidableEq` for
+`SockeyeType`, whose records contain a list of types.) -/
+def SockeyeType.beq : SockeyeType -> SockeyeType -> Bool
+  | .unit, .unit => true
+  | .bool, .bool => true
+  | .int, .int => true
+  | .bitInt n, .bitInt m => n == m
+  | .enum n, .enum m => n == m
+  | .vec n elem, .vec m elem' => n == m && SockeyeType.beq elem elem'
+  | .record fields, .record fields' => SockeyeType.beqFields fields fields'
+  | _, _ => false
+
+def SockeyeType.beqFields : List SockeyeType -> List SockeyeType -> Bool
+  | [], [] => true
+  | t :: ts, t' :: ts' => SockeyeType.beq t t' && SockeyeType.beqFields ts ts'
+  | _, _ => false
+end
+
+mutual
+theorem SockeyeType.eq_of_beq :
+    (t t' : SockeyeType) -> SockeyeType.beq t t' = true -> t = t'
+  | .unit, t', h | .bool, t', h | .int, t', h => by
+    cases t' <;> simp_all [SockeyeType.beq]
+  | .bitInt _, t', h | .enum _, t', h => by
+    cases t' <;> simp_all [SockeyeType.beq]
+  | .vec _ elem, t', h => by
+    cases t' <;> simp [SockeyeType.beq] at h
+    case vec m elem' => simp [h.1, SockeyeType.eq_of_beq elem elem' h.2]
+  | .record fields, t', h => by
+    cases t' <;> simp [SockeyeType.beq] at h
+    case record fields' => simp [SockeyeType.eq_of_beqFields fields fields' h]
+
+theorem SockeyeType.eq_of_beqFields :
+    (ts ts' : List SockeyeType) -> SockeyeType.beqFields ts ts' = true ->
+      ts = ts'
+  | [], ts', h => by cases ts' <;> simp_all [SockeyeType.beqFields]
+  | t :: ts, ts', h => by
+    cases ts' <;> simp [SockeyeType.beqFields] at h
+    case cons t' ts' =>
+      simp [SockeyeType.eq_of_beq t t' h.1,
+        SockeyeType.eq_of_beqFields ts ts' h.2]
+end
+
+/-- `v`, a value of type `t`, as a value of type `t'`, or `none` if the types
+differ. -/
+def SockeyeType.cast (t t' : SockeyeType) (v : t.interp) : Option t'.interp :=
+  if h : SockeyeType.beq t t' then some (SockeyeType.eq_of_beq t t' h ▸ v)
+  else none
+
+/-- The source that gives the `i`-th `any` the `i`-th value of `values`, or `()`
+if there are fewer values, whatever the expected type. The values are
+conveniently written with `NondetValue.of`. -/
+def listSource (values : List NondetValue) : NondetSource :=
+  fun i _ => values[i]?.getD ⟨.unit, ()⟩
+
+/-! ## Effect trees -/
+
+/-- A Sockeye computation with answer `A` in a system with state `S`, as the
+tree of its effects: each effect is a constructor whose continuation `k` gets
+the result of the effect and gives the rest of the computation, except for the
+leaves: the answer, and a failed assertion or assumption, where `code` is the
+Sockeye source text of the condition. Because `anyAndThen` holds a type, the
+trees are in `Type 1`. -/
+inductive SockeyeEffects (S A : Type) : Type 1 where
+  | pure (a : A)
+  | getStateAndThen (k : S -> SockeyeEffects S A)
+  | setStateAndThen (s : S) (k : SockeyeEffects S A)
+  /-- `any<T>`, where `T` is the Lean type of the value, the translation of the
+  Sockeye type `t`. Only `SockeyeEffects.eval` uses `t` and the instance. -/
+  | anyAndThen {T : Type} {t : SockeyeType} [IsSockeyeType T t]
+      (k : T -> SockeyeEffects S A)
+  /-- An assertion that does not hold, which ends the computation, so it needs
+  no answer. -/
+  | failedAssert (code : String)
+  /-- An assumption that does not hold, which ends the computation. -/
+  | failedAssume (code : String)
+
+/-- Runs `m`, and then `f` on its answer. -/
+def SockeyeEffects.bind {S A B : Type} :
+    SockeyeEffects S A -> (A -> SockeyeEffects S B) -> SockeyeEffects S B
+  | .pure a, f => f a
+  | .getStateAndThen k, f => .getStateAndThen (fun s => (k s).bind f)
+  | .setStateAndThen s k, f => .setStateAndThen s (k.bind f)
+  | @anyAndThen _ _ T t _ k, f =>
+    @anyAndThen _ _ T t _ (fun x => (k x).bind f)
+  | .failedAssert code, _ => .failedAssert code
+  | .failedAssume code, _ => .failedAssume code
+
+instance (S : Type) : Monad (SockeyeEffects S) where
+  pure := SockeyeEffects.pure
+  bind := SockeyeEffects.bind
+
+/-! The effects as computations that end right after the effect. -/
+
+def SockeyeEffects.getState {S : Type} : SockeyeEffects S S :=
+  .getStateAndThen .pure
+
+def SockeyeEffects.setState {S : Type} (s : S) : SockeyeEffects S Unit :=
+  .setStateAndThen s (.pure ())
+
+/-- `any<T>`, where `A` is the translation of `T`. -/
+def SockeyeEffects.any {S : Type} (A : Type) {t : SockeyeType}
+    [IsSockeyeType A t] : SockeyeEffects S A :=
+  .anyAndThen (T := A) .pure
+
+def SockeyeEffects.assert {S : Type} (cond : Bool) (code : String) :
+    SockeyeEffects S Unit :=
+  if cond then .pure () else .failedAssert code
+
+def SockeyeEffects.assume {S : Type} (cond : Bool) (code : String) :
+    SockeyeEffects S Unit :=
+  if cond then .pure () else .failedAssume code
+
+/-! ## The state of a system
+
+The state of a system is a pair of the part `C` for the values of the constants
+and the part `S` for the state of the instances, each of which is `.none` at the
+start of a run: a run starts with `init_consts`, which stores the values of the
+constants, and then `init_state`, which stores the state in which the instances
+start, so that their initial values can read the constants. -/
+
+/-- The values `C` of the constants, which `init_consts` stores in the first
+part of the state at the start of a run. Before that, it fails an assertion. -/
+def SockeyeEffects.get_consts {C S : Type} :
+    SockeyeEffects (Option C × S) C := do
+  let (consts, _) <- SockeyeEffects.getState
+  match consts with
+  | .some c => pure c
+  | .none => SockeyeEffects.failedAssert "init_consts ran"
+
+/-- The state `S` of the instances, which `init_state` stores in the second part
+of the state at the start of a run. Before that, it fails an assertion. -/
+def SockeyeEffects.get_instance_state {C S : Type} :
+    SockeyeEffects (C × Option S) S := do
+  let (_, state) <- SockeyeEffects.getState
+  match state with
+  | .some s => pure s
+  | .none => SockeyeEffects.failedAssert "init_state ran"
+
+/-- Replaces the state `S` of the instances by `s`. -/
+def SockeyeEffects.set_instance_state {C S : Type} (s : S) :
+    SockeyeEffects (C × Option S) Unit := do
+  let (c, _) <- SockeyeEffects.getState
+  SockeyeEffects.setState (c, .some s)
 
 /-! ## State lenses -/
 
@@ -133,148 +429,157 @@ def Lens.compose {S P Q : Type} (l1 : Lens S P) (l2 : Lens P Q) : Lens S Q where
   get := fun s => l2.get (l1.get s)
   set := fun s q => l1.set s (l2.set (l1.get s) q)
 
-/-- Reads the part of the state that the lens points to. The `M` in this and the following names
-stands for "monadic". -/
-def Lens.getM {S P : Type} {M : Type -> Type} [SockeyeMonad S M] (l : Lens S P) : M P := do
-  let s <- SockeyeMonad.getState
-  pure (l.get s)
-
-def Lens.modifyM {S P : Type} {M : Type -> Type} [SockeyeMonad S M] (l : Lens S P) (f : P -> P) :
-    M Unit := do
-  let s <- SockeyeMonad.getState
-  SockeyeMonad.setState (l.set s (f (l.get s)))
-
-def Lens.setM {S P : Type} {M : Type -> Type} [SockeyeMonad S M] (l : Lens S P) (v : P) :
-    M Unit :=
-  l.modifyM (fun _ => v)
-
 /-! ## References to primitive instances
 
-Like the `Ref` structures that the backend emits for user-defined modules, these say where an
-instance is in the state `S` of the whole system, and their functions are named like the Sockeye
-builtins, so that a Sockeye call `x.f(args)` always becomes `self.x.f args`. -/
+Like the `Ref` structures that the backend emits for user-defined modules, these
+say where an instance is in the state `S` of the whole system, and their
+functions are named like the Sockeye builtins, so that a Sockeye call
+`x.f(args)` always becomes `self.x.f args`.
+
+Their lenses point into the state `S` of the instances. -/
 
 /-- Where an instance of `State<P>` is. -/
 structure StateRef (S P : Type) where
   _lens : Lens S P
 
-/-- `st.get()`. -/
-def StateRef.get {S P : Type} {M : Type -> Type} [SockeyeMonad S M] (self : StateRef S P) : M P :=
-  self._lens.getM
+/-- `st.get()`. Like all functions without parameters, it takes `()`. -/
+def StateRef.get {C S P : Type} (self : StateRef S P) (_ : Unit) :
+    SockeyeEffects (C × Option S) P := do
+  pure (self._lens.get (<- SockeyeEffects.get_instance_state))
 
 /-- `st.set(v)`. -/
-def StateRef.set {S P : Type} {M : Type -> Type} [SockeyeMonad S M] (self : StateRef S P) (v : P) :
-    M Unit :=
-  self._lens.setM v
+def StateRef.set {C S P : Type} (self : StateRef S P) (v : P) :
+    SockeyeEffects (C × Option S) Unit := do
+  let s <- SockeyeEffects.get_instance_state
+  SockeyeEffects.set_instance_state (self._lens.set s v)
 
-/-- Where an instance of `Array<BitInt(n), V>` is. Its contents are a `Vec n V`. -/
+/-- Where an instance of `Array<BitInt(n), V>` is. Its contents are a
+`Vec n V`. -/
 structure ArrayRef (S : Type) (n : Nat) (V : Type) where
   _lens : Lens S (Vec n V)
 
 /-- `arr.get()`, the whole contents. -/
-def ArrayRef.get {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M]
-    (self : ArrayRef S n V) : M (Vec n V) :=
-  self._lens.getM
+def ArrayRef.get {C S V : Type} {n : Nat} (self : ArrayRef S n V) (_ : Unit) :
+    SockeyeEffects (C × Option S) (Vec n V) := do
+  pure (self._lens.get (<- SockeyeEffects.get_instance_state))
 
 /-- `arr.set(a)`, which replaces the whole contents. -/
-def ArrayRef.set {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M]
-    (self : ArrayRef S n V) (a : Vec n V) : M Unit :=
-  self._lens.setM a
+def ArrayRef.set {C S V : Type} {n : Nat} (self : ArrayRef S n V)
+    (a : Vec n V) : SockeyeEffects (C × Option S) Unit := do
+  let s <- SockeyeEffects.get_instance_state
+  SockeyeEffects.set_instance_state (self._lens.set s a)
 
 /-- `arr.load(i)`. -/
-def ArrayRef.load {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M]
-    (self : ArrayRef S n V) (i : BitVec n) : M V := do
-  let a <- self._lens.getM
-  pure (a i)
+def ArrayRef.load {C S V : Type} {n : Nat} (self : ArrayRef S n V)
+    (i : BitVec n) : SockeyeEffects (C × Option S) V := do
+  pure (self._lens.get (<- SockeyeEffects.get_instance_state) i)
 
 /-- `arr.store(i, x)`. -/
-def ArrayRef.store {S V : Type} {n : Nat} {M : Type -> Type} [SockeyeMonad S M]
-    (self : ArrayRef S n V) (i : BitVec n) (x : V) : M Unit :=
-  self._lens.modifyM (fun a => a.set i x)
+def ArrayRef.store {C S V : Type} {n : Nat} (self : ArrayRef S n V)
+    (i : BitVec n) (x : V) : SockeyeEffects (C × Option S) Unit := do
+  let s <- SockeyeEffects.get_instance_state
+  SockeyeEffects.set_instance_state
+    (self._lens.set s ((self._lens.get s).set i x))
 
-/-- `arr.store_repeated_inclusive(lo, hi, x)`. It is an error if `lo` is above `hi`. -/
-def ArrayRef.store_repeated_inclusive {S V : Type} {n : Nat} {M : Type -> Type}
-    [SockeyeMonad S M] (self : ArrayRef S n V) (lo hi : BitVec n) (x : V) : M Unit := do
-  SockeyeMonad.assert (lo.ule hi) "store_repeated_inclusive: low <= high"
-  self._lens.modifyM (fun a => a.setRange lo hi x)
+/-- `arr.store_repeated_inclusive(lo, hi, x)`. It is an error if `lo` is above
+`hi`. -/
+def ArrayRef.store_repeated_inclusive {C S V : Type} {n : Nat}
+    (self : ArrayRef S n V) (lo hi : BitVec n) (x : V) :
+    SockeyeEffects (C × Option S) Unit := do
+  SockeyeEffects.assert (lo.ule hi) "store_repeated_inclusive: low <= high"
+  let s <- SockeyeEffects.get_instance_state
+  SockeyeEffects.set_instance_state
+    (self._lens.set s ((self._lens.get s).setRange lo hi x))
+
+/-! ## Fuel
+
+Callees are connected to instances one level of fuel below, so that the wiring
+can be cyclic: the translation of each module `M` emits `MBuilder.wire`, which
+builds the `Builder`s of an instance of `M` and the instances below it from
+the level below, and `Fuel.fix` builds the levels for the top-level module. -/
+
+/-- The level built by `wireLevel` from `fuel` levels below it: at fuel 0,
+`wireLevel` gets `none`, so that the callees it connects run out of fuel. -/
+def Fuel.fix.{u} {B : Type u} (wireLevel : Option (Unit -> B) -> B) : Nat -> B
+  | 0 => wireLevel none
+  | n + 1 => wireLevel (some fun _ => Fuel.fix wireLevel n)
+
+/-- The computation of a function of a callee that has run out of fuel, because
+the calls through callees are nested too deeply at `path`: it fails an
+assertion that says so. -/
+def SockeyeEffects.outOfFuel {S A : Type} (path : String) :
+    SockeyeEffects S A :=
+  SockeyeEffects.failedAssert ("out of fuel trying to access " ++ path)
 
 /-! ## Proving: weakest preconditions -/
 
-/-- The specification monad. Given an `m` of type `SpecM S A`, where `S` is the
-state type and `A` is the answer type of the computation, `m post s` holds if
-running `m` in initial state `s` violates no `assert`s, whatever values `any` picks,
-and each run that satisfies all `assume`s ends with a result and state satisfying `post`. -/
-def SpecM (S A : Type) : Type :=
-  (A -> S -> Prop) -> S -> Prop
+/-- The weakest precondition (wp) of `m` for the postcondition `post`:
+`m.wp post s` holds if running `m` in initial state `s` violates no `assert`s,
+whatever values `any` picks, and each run that satisfies all `assume`s ends with
+an answer and state satisfying `post`. -/
+def SockeyeEffects.wp {S A : Type} :
+    SockeyeEffects S A -> (A -> S -> Prop) -> S -> Prop
+  | .pure a, post, s => post a s
+  | .getStateAndThen k, post, s => (k s).wp post s
+  | .setStateAndThen s' k, post, _ => k.wp post s'
+  | @anyAndThen _ _ T _ _ k, post, s => forall (x : T), (k x).wp post s
+  | .failedAssert _, _, _ => False
+  | .failedAssume _, _, _ => True
 
-protected def SpecM.pure {S A : Type} (a : A) : SpecM S A := fun post s => post a s
+/-! ## Running: simulation with given or pseudo-random choices -/
 
-protected def SpecM.bind {S A B : Type} (m : SpecM S A) (f : A -> SpecM S B) : SpecM S B :=
-  fun post s => m (fun a s' => f a post s') s
-
-instance (S : Type) : Monad (SpecM S) where
-  pure := SpecM.pure
-  bind := SpecM.bind
-
-/-- The weakest precondition of `m` for the postcondition `post`. -/
-def SpecM.wp {S A : Type} (m : SpecM S A) (post : A -> S -> Prop) (s : S) : Prop :=
-  m post s
-
-instance (S : Type) : SockeyeMonad S (SpecM S) where
-  getState := fun post s => post s s
-  setState s' := fun post _ => post () s'
-  any A _ := fun post s => forall (x : A), post x s
-  assert cond _code := fun post s => (cond = true) /\ post () s
-  assume cond _code := fun post s => (cond = true) -> post () s
-
-/-! ## Running: simulation with pseudo-random choices -/
-
-/-- How a run in the execution monad `ExecM` ended, with an answer of type `A` if it succeeded. -/
+/-- How a run of `SockeyeEffects.eval` ended, with an answer of type `A` if it
+succeeded. -/
 inductive ExecResult (A : Type) where
   | success (val : A)
   /-- An assertion failed; `code` is its Sockeye source text. -/
   | assertionFailed (code : String)
-  /-- An assumption did not hold, so this run does not count; `code` is its Sockeye source text. -/
+  /-- An assumption did not hold, so this run does not count; `code` is its
+  Sockeye source text. -/
   | assumptionFailed (code : String)
+  /-- The `NondetSource` gave an `any` a value of another type, which `msg`
+  describes, so this run does not count either. -/
+  | illTypedNondetSource (msg : String)
   deriving Repr
 
-/-- The execution monad (`ExecM`): a computation that threads the pseudo-random number generator
-and the state, and stops at the first failed assertion or assumption. -/
-def ExecM (S A : Type) : Type :=
-  PRNGState -> S -> Prod (ExecResult A) (Prod PRNGState S)
+/-- `t` on a single line, for messages. -/
+def SockeyeType.toString (t : SockeyeType) : String :=
+  (repr t).pretty 1000000
 
-/-- Runs `m` from state `st`, with `seed` determining the values that `any` picks. -/
-def ExecM.run {S A : Type} (m : ExecM S A) (seed : Nat) (st : S) : Prod (ExecResult A) S :=
-  let (res, _, finalSt) := m { current := UInt64.ofNat seed } st
-  (res, finalSt)
+/-- `n` as an English ordinal number, e.g. `0th`, `1st`, `2nd`, `3rd`, `11th` or
+`21st`. -/
+def ordinal (n : Nat) : String :=
+  let suffix :=
+    if n % 100 / 10 == 1 then "th"
+    else match n % 10 with
+      | 1 => "st"
+      | 2 => "nd"
+      | 3 => "rd"
+      | _ => "th"
+  s!"{n}{suffix}"
 
-/-- Runs a scenario, i.e. a function of the top-level module without parameters, with `self` as
-the reference `R` to the top-level instance, from state `init`, and returns how the run ended.
-`R` can be in a higher universe, because a `Ref` that holds implementations of interfaces is. -/
-def runScenario {S : Type} {R : Type _} (scenario : R -> ExecM S Unit) (self : R) (init : S)
-    (seed : Nat := 0) : ExecResult Unit :=
-  (ExecM.run (scenario self) seed init).1
-
-instance (S : Type) : Monad (ExecM S) where
-  pure a := fun seed s => (ExecResult.success a, seed, s)
-  bind m f := fun seed s =>
-    match m seed s with
-    | (ExecResult.success a, seed', s') => f a seed' s'
-    | (ExecResult.assertionFailed code, seed', s') => (ExecResult.assertionFailed code, seed', s')
-    | (ExecResult.assumptionFailed code, seed', s') => (ExecResult.assumptionFailed code, seed', s')
-
-instance (S : Type) : SockeyeMonad S (ExecM S) where
-  getState := fun seed s => (ExecResult.success s, seed, s)
-  setState s' := fun seed _ => (ExecResult.success (), seed, s')
-  any A _ := fun seed s =>
-    let (val, seed') := RandomVal.randomVal (A := A) seed
-    (ExecResult.success val, seed', s)
-  assert cond code := fun seed s =>
-    if cond then (ExecResult.success (), seed, s)
-    else (ExecResult.assertionFailed code, seed, s)
-  assume cond code := fun seed s =>
-    if cond then (ExecResult.success (), seed, s)
-    else (ExecResult.assumptionFailed code, seed, s)
+/-- Runs `m` from state `s`, where `source` gives the values of the `any`s and
+`i` of them were evaluated before (`0` for a whole run), and returns how the run
+ended and the final state. The run stops at the first failed assertion or
+assumption, or at the first value of the wrong type. -/
+def SockeyeEffects.eval {S A : Type} :
+    SockeyeEffects S A -> NondetSource -> Nat -> S -> ExecResult A × S
+  | .pure a, _, _, s => (ExecResult.success a, s)
+  | .getStateAndThen k, source, i, s => (k s).eval source i s
+  | .setStateAndThen s' k, source, i, _ => k.eval source i s'
+  | @anyAndThen _ _ T t _ k, source, i, s =>
+    match source i t with
+    | ⟨t', v⟩ =>
+      match SockeyeType.cast t' t v with
+      | some x =>
+        (k (IsSockeyeType.construct (T := T) x)).eval source (i + 1) s
+      | none =>
+        (ExecResult.illTypedNondetSource
+          (s!"the source has a value of type {t'.toString} for the " ++
+            s!"{ordinal i} any but a value of type {t.toString} was expected"),
+          s)
+  | .failedAssert code, _, _, s => (ExecResult.assertionFailed code, s)
+  | .failedAssume code, _, _, s => (ExecResult.assumptionFailed code, s)
 
 set_option linter.unusedVariables false
 
@@ -284,41 +589,19 @@ inductive AccessMode where
   | execute
   | read
   | write
-  deriving Inhabited, DecidableEq, Repr
-
-instance : RandomVal AccessMode where
-  randomVal s :=
-    (match s.bits.toNat % 3 with
-     | 0 => .execute
-     | 1 => .read
-     | _ => .write
-     , s.next)
+  deriving DecidableEq, Repr
 
 structure Request where
   address : (BitVec 32)
   domain_id : (BitVec 4)
   mode : AccessMode
   value : (BitVec 32)
-  deriving Inhabited, DecidableEq, Repr
-
-instance : RandomVal Request where
-  randomVal s :=
-    let (v0, s) := RandomVal.randomVal s
-    let (v1, s) := RandomVal.randomVal s
-    let (v2, s) := RandomVal.randomVal s
-    let (v3, s) := RandomVal.randomVal s
-    ({ address := v0, domain_id := v1, mode := v2, value := v3 }, s)
+  deriving DecidableEq, Repr
 
 structure Reply where
   ok : Bool
   value : (BitVec 32)
-  deriving Inhabited, DecidableEq, Repr
-
-instance : RandomVal Reply where
-  randomVal s :=
-    let (v0, s) := RandomVal.randomVal s
-    let (v1, s) := RandomVal.randomVal s
-    ({ ok := v0, value := v1 }, s)
+  deriving DecidableEq, Repr
 
 
 /-! ## Type aliases -/
@@ -328,39 +611,45 @@ abbrev Byte := (BitVec 8)
 abbrev DomainID := (BitVec 4)
 abbrev RegisterOffset := (BitVec 17)
 
-/-! ## Global constants -/
+/-! ## Constants -/
 
-def CPU_DOMAIN_ID : DomainID := 3#4
-def USB_DOMAIN_ID : DomainID := 11#4
+-- The values of all constants are picked at the start of a run, by
+-- `init_consts`, so that a proof about a run can introduce the values of
+-- their `any`s first. Until then, the part of the state for them is `.none`.
+-- A function reads the constant `X` of module `M` as
+-- `(<- SockeyeEffects.get_consts).M.X`.
 
-/-! ## Module-local constants -/
+structure TRDC_MGRConsts where
+  BASE_ADDRESS : (BitVec 32)
+  MRC_BASE : RegisterOffset
 
-def TRDC_MGR.BASE_ADDRESS : (BitVec 32) := 0x49010000#32
-def TRDC_MGR.MRC_BASE : RegisterOffset := 0x18000#17
-def TRDC_MRC.ALLOWED_DEFAULT_DID : DomainID := 3#4
-def Main.DMA_FIRST : PhysAddr := 0x90000000#32
-def Main.DMA_LAST : PhysAddr := 0x90ffffff#32
+structure TRDC_MRCConsts where
+  ALLOWED_DEFAULT_DID : DomainID
+
+structure MainConsts where
+  DMA_FIRST : PhysAddr
+  DMA_LAST : PhysAddr
+
+structure Consts where
+  CPU_DOMAIN_ID : DomainID
+  USB_DOMAIN_ID : DomainID
+  TRDC_MGR : TRDC_MGRConsts
+  TRDC_MRC : TRDC_MRCConsts
+  Main : MainConsts
+
 
 /-! ## Module states -/
 
 structure DramState where
-  /-- The initial contents are not determined by the Sockeye spec. -/
-  backing : (Vec 31 Byte) := default
-
-def DramState.lens_backing : Lens DramState (Vec 31 Byte) where
-  get := fun s => s.backing
-  set := fun s v => { s with backing := v }
+  backing : (Vec 31 Byte)
+  deriving Repr
 
 structure GenericSinkState where
   deriving Repr
 
 structure TRDC_MGRState where
-  /-- The initial contents are not determined by the Sockeye spec. -/
-  raw_regs : (Vec 15 (BitVec 32)) := default
-
-def TRDC_MGRState.lens_raw_regs : Lens TRDC_MGRState (Vec 15 (BitVec 32)) where
-  get := fun s => s.raw_regs
-  set := fun s v => { s with raw_regs := v }
+  raw_regs : (Vec 15 (BitVec 32))
+  deriving Repr
 
 structure TRDC_MRCState where
   deriving Repr
@@ -375,59 +664,105 @@ structure InterconnectState where
   deriving Repr
 
 structure SystemState where
-  dram : DramState := {}
-  usb_regs : GenericSinkState := {}
-  trdc_mgr : TRDC_MGRState := {}
-  mrc : TRDC_MRCState := {}
-  interconnect : InterconnectState := {}
-  usb : UsbState := {}
-
-def SystemState.lens_dram : Lens SystemState DramState where
-  get := fun s => s.dram
-  set := fun s v => { s with dram := v }
-
-def SystemState.lens_usb_regs : Lens SystemState GenericSinkState where
-  get := fun s => s.usb_regs
-  set := fun s v => { s with usb_regs := v }
-
-def SystemState.lens_trdc_mgr : Lens SystemState TRDC_MGRState where
-  get := fun s => s.trdc_mgr
-  set := fun s v => { s with trdc_mgr := v }
-
-def SystemState.lens_mrc : Lens SystemState TRDC_MRCState where
-  get := fun s => s.mrc
-  set := fun s v => { s with mrc := v }
-
-def SystemState.lens_interconnect : Lens SystemState InterconnectState where
-  get := fun s => s.interconnect
-  set := fun s v => { s with interconnect := v }
-
-def SystemState.lens_usb : Lens SystemState UsbState where
-  get := fun s => s.usb
-  set := fun s v => { s with usb := v }
+  dram : DramState
+  usb_regs : GenericSinkState
+  trdc_mgr : TRDC_MGRState
+  mrc : TRDC_MRCState
+  interconnect : InterconnectState
+  usb : UsbState
+  deriving Repr
 
 structure MainState where
-  system : SystemState := {}
-  cpu : AnyRequestCpuState := {}
-
-def MainState.lens_system : Lens MainState SystemState where
-  get := fun s => s.system
-  set := fun s v => { s with system := v }
-
-def MainState.lens_cpu : Lens MainState AnyRequestCpuState where
-  get := fun s => s.cpu
-  set := fun s v => { s with cpu := v }
+  system : SystemState
+  cpu : AnyRequestCpuState
+  deriving Repr
 
 
-/-! ## Module references: where an instance, its sub-instances and its callees are in the state `S` of the whole system -/
+/-! ## Boilerplate needed by the functions -/
+
+
+/-! ### IsSockeyeType instances for records/enums, for SockeyeEffects.any -/
+
+instance : IsSockeyeType AccessMode (SockeyeType.enum 2) where
+  construct i := match (i : Fin 3).val with
+    | 0 => .execute
+    | 1 => .read
+    | _ => .write
+  destruct x := match x with
+    | .execute => (0 : Fin 3)
+    | .read => (1 : Fin 3)
+    | .write => (2 : Fin 3)
+  construct_destruct x := by cases x <;> rfl
+
+instance : IsSockeyeType Request
+    (SockeyeType.record [(SockeyeType.bitInt 32), (SockeyeType.bitInt 4),
+                         (SockeyeType.enum 2), (SockeyeType.bitInt 32)]) where
+  construct := fun ⟨address_0, domain_id_0, mode_0, value_0, ()⟩ =>
+    { address := IsSockeyeType.construct address_0
+      domain_id := IsSockeyeType.construct domain_id_0
+      mode := IsSockeyeType.construct mode_0
+      value := IsSockeyeType.construct value_0 }
+  destruct x :=
+    (IsSockeyeType.destruct x.address,
+     IsSockeyeType.destruct x.domain_id,
+     IsSockeyeType.destruct x.mode,
+     IsSockeyeType.destruct x.value,
+     ())
+  construct_destruct _ := by simp
+
+instance : IsSockeyeType Reply
+    (SockeyeType.record [SockeyeType.bool, (SockeyeType.bitInt 32)]) where
+  construct := fun ⟨ok_0, value_0, ()⟩ =>
+    { ok := IsSockeyeType.construct ok_0
+      value := IsSockeyeType.construct value_0 }
+  destruct x :=
+    (IsSockeyeType.destruct x.ok,
+     IsSockeyeType.destruct x.value,
+     ())
+  construct_destruct _ := by simp
+
+
+/-! ### Module Refs: find (sub-)instance state within whole-system state S -/
 
 /-- An implementation of the interface `Handler` in a system with state `S`. -/
 structure Handler (S : Type) where
-  request : {M : Type -> Type} -> [SockeyeMonad S M] -> (r : Request) -> M Reply
+  request : (r : Request) -> SockeyeEffects (Option Consts × Option S) Reply
 
 /-- An implementation of the interface `CPU` in a system with state `S`. -/
 structure CPU (S : Type) where
-  step : {M : Type -> Type} -> [SockeyeMonad S M] -> M Unit
+  step : Unit -> SockeyeEffects (Option Consts × Option S) Unit
+
+/-- An implementation of the functions of module `TRDC_MGR` in a system with
+    state `S`, which a callee of type `TRDC_MGR` holds. -/
+structure TRDC_MGRInterface (S : Type) where
+  read32bit_reg :
+    (byte_offset : RegisterOffset) ->
+    SockeyeEffects (Option Consts × Option S) (BitVec 32)
+  offset_TRDC_CR :
+    Unit ->
+    SockeyeEffects (Option Consts × Option S) RegisterOffset
+  get_TRDC_CR : Unit -> SockeyeEffects (Option Consts × Option S) (BitVec 32)
+  offset_MRC0_GLBACn :
+    (n : RegisterOffset) ->
+    SockeyeEffects (Option Consts × Option S) RegisterOffset
+  get_MRC0_GLBACn :
+    (n : RegisterOffset) ->
+    SockeyeEffects (Option Consts × Option S) (BitVec 32)
+  offset_MRC0_DOMd_RGDr_Ww :
+    (d : RegisterOffset) ->
+    (r : RegisterOffset) ->
+    (w : RegisterOffset) ->
+    SockeyeEffects (Option Consts × Option S) RegisterOffset
+  get_MRC0_DOMd_RGDr_Ww :
+    (d : RegisterOffset) ->
+    (r : RegisterOffset) ->
+    (w : RegisterOffset) ->
+    SockeyeEffects (Option Consts × Option S) (BitVec 32)
+  is_register :
+    (o : RegisterOffset) ->
+    SockeyeEffects (Option Consts × Option S) Bool
+  request : (r : Request) -> SockeyeEffects (Option Consts × Option S) Reply
+  reset : Unit -> SockeyeEffects (Option Consts × Option S) Unit
 
 structure DramRef (S : Type) where
   _lens : Lens S DramState
@@ -442,7 +777,7 @@ structure TRDC_MGRRef (S : Type) where
 
 structure TRDC_MRCRef (S : Type) where
   _lens : Lens S TRDC_MRCState
-  trdc_mgr : TRDC_MGRRef S
+  trdc_mgr : TRDC_MGRInterface S
   target : Handler S
 
 structure AnyRequestCpuRef (S : Type) where
@@ -479,120 +814,227 @@ structure MainRef (S : Type) where
 
 section Functions
 
-/- `S` abstracts over all the state that exists in the whole model. At the time
-   we define the functions, we don't yet know what that state will be.
-   At use sites, `S` will be instantiated with a deeply nested record type that
-   holds the state of the main Sockeye module as well as all its sub-instances,
-   and perhaps also state of other components that were not modeled in Sockeye. -/
+/- `S` abstracts over all the state that exists in the whole model. At the
+   time we define the functions, we don't yet know what that state will be.
+   At use sites, `S` will be instantiated with a deeply nested record type
+   that holds the state of the main Sockeye module as well as all its
+   sub-instances, and perhaps also state of other components that were not
+   modeled in Sockeye. -/
 variable {S : Type}
 
-/- Abstracts over whether we want to use the Lean code to evaluate scenarios
-   or to prove weakest preconditions. -/
-variable {M : Type -> Type} [SockeyeMonad S M]
+/- The type of the computations in this section that return a value of type
+   `A` is `SockeyeResult A`, where `S` is the variable above. -/
+local notation "SockeyeResult" => SockeyeEffects (Option Consts × Option S)
+
+-- Values of the constants
+
+/-- Picks the values of all constants, in the order of their definitions. -/
+def build_consts : SockeyeResult Consts := do
+  let CPU_DOMAIN_ID : DomainID := 3#4
+  let USB_DOMAIN_ID : DomainID := 11#4
+  let TRDC_MGR : TRDC_MGRConsts <- do
+    let BASE_ADDRESS : (BitVec 32) := 0x49010000#32
+    let MRC_BASE : RegisterOffset := 0x18000#17
+    pure {
+      BASE_ADDRESS
+      MRC_BASE
+    }
+  let TRDC_MRC : TRDC_MRCConsts <- do
+    let ALLOWED_DEFAULT_DID : DomainID := 3#4
+    pure {
+      ALLOWED_DEFAULT_DID
+    }
+  let Main : MainConsts <- do
+    let DMA_FIRST : PhysAddr := 0x90000000#32
+    let DMA_LAST : PhysAddr := 0x90ffffff#32
+    pure {
+      DMA_FIRST
+      DMA_LAST
+    }
+  pure {
+    CPU_DOMAIN_ID
+    USB_DOMAIN_ID
+    TRDC_MGR
+    TRDC_MRC
+    Main
+  }
+
+/-- Picks the values of all constants, and stores them in the state. Each run
+    starts with it. -/
+def init_consts : SockeyeResult Unit := do
+  let c <- build_consts
+  let (_, s) <- SockeyeEffects.getState
+  SockeyeEffects.setState (.some c, s)
+
+-- Initial states
+
+def DramState.initial : SockeyeResult DramState := do
+  pure {
+    backing := (<- SockeyeEffects.any (Vec 31 Byte))
+  }
+
+def GenericSinkState.initial : SockeyeResult GenericSinkState := do
+  pure {}
+
+def TRDC_MGRState.initial : SockeyeResult TRDC_MGRState := do
+  pure {
+    raw_regs := (<- SockeyeEffects.any (Vec 15 (BitVec 32)))
+  }
+
+def TRDC_MRCState.initial : SockeyeResult TRDC_MRCState := do
+  pure {}
+
+def AnyRequestCpuState.initial : SockeyeResult AnyRequestCpuState := do
+  pure {}
+
+def UsbState.initial : SockeyeResult UsbState := do
+  pure {}
+
+def InterconnectState.initial : SockeyeResult InterconnectState := do
+  pure {}
+
+def SystemState.initial : SockeyeResult SystemState := do
+  pure {
+    dram := (<- DramState.initial)
+    usb_regs := (<- GenericSinkState.initial)
+    trdc_mgr := (<- TRDC_MGRState.initial)
+    mrc := (<- TRDC_MRCState.initial)
+    interconnect := (<- InterconnectState.initial)
+    usb := (<- UsbState.initial)
+  }
+
+def MainState.initial : SockeyeResult MainState := do
+  pure {
+    system := (<- SystemState.initial)
+    cpu := (<- AnyRequestCpuState.initial)
+  }
 
 -- Module Dram
 
-def DramRef.request (self : DramRef S) (r : Request) : M Reply := do
+def DramRef.request (self : DramRef S) (r : Request) : SockeyeResult Reply := do
   let byte_off : (BitVec 31) := (BitVec.extractLsb' 0 31 r.address)
-  let _t5 : Reply <-
-    if (r.mode == AccessMode.write) then do
-      let value : (BitVec 32) := r.value
-      self.backing.store byte_off (BitVec.extractLsb' 0 8 value)
-      self.backing.store (byte_off + 1#31) (BitVec.extractLsb' 8 8 value)
-      self.backing.store (byte_off + 2#31) (BitVec.extractLsb' 16 8 value)
-      self.backing.store (byte_off + 3#31) (BitVec.extractLsb' 24 8 value)
-      pure ({ ok := true, value := 0#32 } : Reply)
-    else do
-      let _t1 <- self.backing.load (byte_off + 3#31)
-      let _t2 <- self.backing.load (byte_off + 2#31)
-      let _t3 <- self.backing.load (byte_off + 1#31)
-      let _t4 <- self.backing.load byte_off
-      let value_1 : (BitVec 32) := (((_t1 ++ _t2) ++ _t3) ++ _t4)
-      pure ({ ok := true, value := value_1 } : Reply)
-  pure _t5
+  if (r.mode == AccessMode.write) then
+    let value : (BitVec 32) := r.value
+    self.backing.store byte_off (BitVec.extractLsb' 0 8 value)
+    self.backing.store (byte_off + 1#31) (BitVec.extractLsb' 8 8 value)
+    self.backing.store (byte_off + 2#31) (BitVec.extractLsb' 16 8 value)
+    self.backing.store (byte_off + 3#31) (BitVec.extractLsb' 24 8 value)
+    pure ({ ok := true, value := 0#32 } : Reply)
+  else
+    let value_1 : (BitVec 32) :=
+        ((<- self.backing.load (byte_off + 3#31)) ++
+         (<- self.backing.load (byte_off + 2#31)) ++
+         (<- self.backing.load (byte_off + 1#31)) ++
+         (<- self.backing.load byte_off))
+    pure ({ ok := true, value := value_1 } : Reply)
 
 -- Module GenericSink
 
-def GenericSinkRef.request (self : GenericSinkRef S) (r : Request) : M Reply := do
-  let _t1 <- SockeyeMonad.any Reply
-  pure ({ _t1 with ok := false } : Reply)
+def GenericSinkRef.request (self : GenericSinkRef S) (r : Request)
+    : SockeyeResult Reply := do
+  pure { (<- SockeyeEffects.any Reply) with ok := false }
 
 -- Module TRDC_MGR
 
-def TRDC_MGRRef.read32bit_reg (self : TRDC_MGRRef S) (byte_offset : RegisterOffset) : M (BitVec 32) := do
+def TRDC_MGRRef.read32bit_reg (self : TRDC_MGRRef S)
+    (byte_offset : RegisterOffset) : SockeyeResult (BitVec 32) := do
   self.raw_regs.load (BitVec.extractLsb' 2 15 byte_offset)
 
-def TRDC_MGRRef.offset_TRDC_CR (self : TRDC_MGRRef S) : M RegisterOffset := do
+def TRDC_MGRRef.offset_TRDC_CR (self : TRDC_MGRRef S) (_ : Unit)
+    : SockeyeResult RegisterOffset := do
   pure 0#17
 
-def TRDC_MGRRef.get_TRDC_CR (self : TRDC_MGRRef S) : M (BitVec 32) := do
-  let _t1 <- self.offset_TRDC_CR
-  self.read32bit_reg _t1
+def TRDC_MGRRef.get_TRDC_CR (self : TRDC_MGRRef S) (_ : Unit)
+    : SockeyeResult (BitVec 32) := do
+  self.read32bit_reg (<- self.offset_TRDC_CR ())
 
-def TRDC_MGRRef.offset_MRC0_GLBACn (self : TRDC_MGRRef S) (n : RegisterOffset) : M RegisterOffset := do
-  pure ((TRDC_MGR.MRC_BASE + 0x20#17) + (n * 0x4#17))
+def TRDC_MGRRef.offset_MRC0_GLBACn (self : TRDC_MGRRef S) (n : RegisterOffset)
+    : SockeyeResult RegisterOffset := do
+  pure
+      ((<- SockeyeEffects.get_consts).TRDC_MGR.MRC_BASE +
+       0x20#17 +
+       (n * 0x4#17))
 
-def TRDC_MGRRef.get_MRC0_GLBACn (self : TRDC_MGRRef S) (n : RegisterOffset) : M (BitVec 32) := do
-  let _t1 <- self.offset_MRC0_GLBACn n
-  self.read32bit_reg _t1
+def TRDC_MGRRef.get_MRC0_GLBACn (self : TRDC_MGRRef S) (n : RegisterOffset)
+    : SockeyeResult (BitVec 32) := do
+  self.read32bit_reg (<- self.offset_MRC0_GLBACn n)
 
-def TRDC_MGRRef.offset_MRC0_DOMd_RGDr_Ww (self : TRDC_MGRRef S) (d : RegisterOffset) (r : RegisterOffset) (w : RegisterOffset) : M RegisterOffset := do
-  pure ((((TRDC_MGR.MRC_BASE + 0x40#17) + (d * 0x100#17)) + (r * 0x8#17)) + (w * 0x4#17))
+def TRDC_MGRRef.offset_MRC0_DOMd_RGDr_Ww (self : TRDC_MGRRef S)
+    (d : RegisterOffset) (r : RegisterOffset) (w : RegisterOffset)
+    : SockeyeResult RegisterOffset := do
+  pure
+      ((<- SockeyeEffects.get_consts).TRDC_MGR.MRC_BASE +
+       0x40#17 +
+       (d * 0x100#17) +
+       (r * 0x8#17) +
+       (w * 0x4#17))
 
-def TRDC_MGRRef.get_MRC0_DOMd_RGDr_Ww (self : TRDC_MGRRef S) (d : RegisterOffset) (r : RegisterOffset) (w : RegisterOffset) : M (BitVec 32) := do
-  let _t1 <- self.offset_MRC0_DOMd_RGDr_Ww d r w
-  self.read32bit_reg _t1
+def TRDC_MGRRef.get_MRC0_DOMd_RGDr_Ww (self : TRDC_MGRRef S)
+    (d : RegisterOffset) (r : RegisterOffset) (w : RegisterOffset)
+    : SockeyeResult (BitVec 32) := do
+  self.read32bit_reg (<- self.offset_MRC0_DOMd_RGDr_Ww d r w)
 
-def TRDC_MGRRef.is_register (self : TRDC_MGRRef S) (o : RegisterOffset) : M Bool := do
-  let rel : (BitVec 17) := (o - TRDC_MGR.MRC_BASE)
+def TRDC_MGRRef.is_register (self : TRDC_MGRRef S) (o : RegisterOffset)
+    : SockeyeResult Bool := do
+  let rel : (BitVec 17) :=
+      (o - (<- SockeyeEffects.get_consts).TRDC_MGR.MRC_BASE)
   let low_byte : (BitVec 8) := (BitVec.extractLsb' 0 8 rel)
-  let _t1 <- self.offset_TRDC_CR
-  pure (((BitVec.extractLsb' 0 2 o) == 0#2) && (((o == _t1) || ((((BitVec.ule TRDC_MGR.MRC_BASE o) && (BitVec.ult rel 0x100#17)) && (BitVec.ule 0x20#8 low_byte)) && (BitVec.ule low_byte 0x3f#8))) || ((((BitVec.ule TRDC_MGR.MRC_BASE o) && (BitVec.ult rel 0x1000#17)) && (BitVec.ule 0x40#8 low_byte)) && (BitVec.ule low_byte 0xbf#8))))
+  pure
+      (((BitVec.extractLsb' 0 2 o) == 0#2) &&
+       ((o == (<- self.offset_TRDC_CR ())) ||
+        ((BitVec.ule (<- SockeyeEffects.get_consts).TRDC_MGR.MRC_BASE o) &&
+         (BitVec.ult rel 0x100#17) &&
+         (BitVec.ule 0x20#8 low_byte) &&
+         (BitVec.ule low_byte 0x3f#8)) ||
+        ((BitVec.ule (<- SockeyeEffects.get_consts).TRDC_MGR.MRC_BASE o) &&
+         (BitVec.ult rel 0x1000#17) &&
+         (BitVec.ule 0x40#8 low_byte) &&
+         (BitVec.ule low_byte 0xbf#8))))
 
-def TRDC_MGRRef.request (self : TRDC_MGRRef S) (r : Request) : M Reply := do
-  let o32 : (BitVec 32) := (r.address - TRDC_MGR.BASE_ADDRESS)
+def TRDC_MGRRef.request (self : TRDC_MGRRef S) (r : Request)
+    : SockeyeResult Reply := do
+  let o32 : (BitVec 32) :=
+      (r.address - (<- SockeyeEffects.get_consts).TRDC_MGR.BASE_ADDRESS)
   let o : (BitVec 17) := (BitVec.extractLsb' 0 17 o32)
-  let _t1 <- self.is_register o
-  let _t5 : Reply <-
-    if (!_t1) then do
-      let _t2 <- SockeyeMonad.any Reply
-      pure ({ _t2 with ok := false } : Reply)
-    else do
-      let _t4 : Reply <-
-        if (r.mode == AccessMode.write) then do
-          self.raw_regs.store (BitVec.extractLsb' 2 15 o) r.value
-          pure ({ ok := true, value := 0#32 } : Reply)
-        else do
-          let _t3 <- self.read32bit_reg o
-          pure ({ ok := true, value := _t3 } : Reply)
-      pure _t4
-  pure _t5
+  if (!(<- self.is_register o)) then
+    pure { (<- SockeyeEffects.any Reply) with ok := false }
+  else if (r.mode == AccessMode.write) then
+    self.raw_regs.store (BitVec.extractLsb' 2 15 o) r.value
+    pure ({ ok := true, value := 0#32 } : Reply)
+  else
+    pure ({ ok := true, value := (<- self.read32bit_reg o) } : Reply)
 
-def TRDC_MGRRef.reset (self : TRDC_MGRRef S) : M Unit := do
-  self.raw_regs.set ((fun _ => 0#32) : (Vec 15 (BitVec 32)))
-  pure ()
+def TRDC_MGRRef.reset (self : TRDC_MGRRef S) (_ : Unit)
+    : SockeyeResult Unit := do
+  self.raw_regs.set (Vec.repeat 0#32 15)
 
 -- Module TRDC_MRC
 
-def TRDC_MRCRef.is_region_hit (self : TRDC_MRCRef S) (r : Request) (w0 : (BitVec 32)) (w1 : (BitVec 32)) : M Bool := do
+def TRDC_MRCRef.is_region_hit (self : TRDC_MRCRef S) (r : Request)
+    (w0 : (BitVec 32)) (w1 : (BitVec 32)) : SockeyeResult Bool := do
   let start_addr : (BitVec 32) := ((BitVec.extractLsb' 14 18 w0) ++ 0#14)
   let end_addr : (BitVec 32) := ((BitVec.extractLsb' 14 18 w1) ++ 0x3fff#14)
   let valid : Bool := (BitVec.getLsbD w1 0)
-  pure ((valid && (BitVec.ule start_addr r.address)) && (BitVec.ule r.address end_addr))
+  pure
+      (valid &&
+       (BitVec.ule start_addr r.address) &&
+       (BitVec.ule r.address end_addr))
 
-def TRDC_MRCRef.is_allowed_by_glbac (self : TRDC_MRCRef S) (r : Request) (glbac : (BitVec 32)) : M Bool := do
-  let _t1 : Bool := match r.mode with
+def TRDC_MRCRef.is_allowed_by_glbac (self : TRDC_MRCRef S) (r : Request)
+    (glbac : (BitVec 32)) : SockeyeResult Bool := do
+  pure (match r.mode with
       | AccessMode.read => (BitVec.getLsbD glbac 2)
       | AccessMode.write => (BitVec.getLsbD glbac 1)
-      | AccessMode.execute => (BitVec.getLsbD glbac 0)
-  pure _t1
+      | AccessMode.execute => (BitVec.getLsbD glbac 0))
 
-def TRDC_MRCRef.is_access_allowed_by_region (self : TRDC_MRCRef S) (r : Request) (w0 : (BitVec 32)) : M Bool := do
+def TRDC_MRCRef.is_access_allowed_by_region (self : TRDC_MRCRef S) (r : Request)
+    (w0 : (BitVec 32)) : SockeyeResult Bool := do
   let mracsel : (BitVec 3) := (BitVec.extractLsb' 0 3 w0)
   let glbac : (BitVec 32) <- self.trdc_mgr.get_MRC0_GLBACn (0#14 ++ mracsel)
   self.is_allowed_by_glbac r glbac
 
-def TRDC_MRCRef.is_access_allowed (self : TRDC_MRCRef S) (r : Request) : M Bool := do
+def TRDC_MRCRef.is_access_allowed (self : TRDC_MRCRef S) (r : Request)
+    : SockeyeResult Bool := do
   let d : (BitVec 17) := (0#13 ++ r.domain_id)
   let r0_w0 : (BitVec 32) <- self.trdc_mgr.get_MRC0_DOMd_RGDr_Ww d 0#17 0#17
   let r1_w0 : (BitVec 32) <- self.trdc_mgr.get_MRC0_DOMd_RGDr_Ww d 1#17 0#17
@@ -606,240 +1048,652 @@ def TRDC_MRCRef.is_access_allowed (self : TRDC_MRCRef S) (r : Request) : M Bool 
   let r1_hit : Bool <- self.is_region_hit r r1_w0 r1_w1
   let r2_hit : Bool <- self.is_region_hit r r2_w0 r2_w1
   let r3_hit : Bool <- self.is_region_hit r r3_w0 r3_w1
-  let any_hit : Bool := (((r0_hit || r1_hit) || r2_hit) || r3_hit)
-  let _t13 <- self.is_access_allowed_by_region r r0_w0
-  let _t14 <- self.is_access_allowed_by_region r r1_w0
-  let _t15 <- self.is_access_allowed_by_region r r2_w0
-  let _t16 <- self.is_access_allowed_by_region r r3_w0
-  pure ((((any_hit && (!r0_hit || _t13)) && (!r1_hit || _t14)) && (!r2_hit || _t15)) && (!r3_hit || _t16))
+  let any_hit : Bool := (r0_hit || r1_hit || r2_hit || r3_hit)
+  pure
+      (any_hit &&
+       (!r0_hit || (<- self.is_access_allowed_by_region r r0_w0)) &&
+       (!r1_hit || (<- self.is_access_allowed_by_region r r1_w0)) &&
+       (!r2_hit || (<- self.is_access_allowed_by_region r r2_w0)) &&
+       (!r3_hit || (<- self.is_access_allowed_by_region r r3_w0)))
 
-def TRDC_MRCRef.request (self : TRDC_MRCRef S) (r : Request) : M Reply := do
-  let trdc_cr : (BitVec 32) <- self.trdc_mgr.get_TRDC_CR
+def TRDC_MRCRef.request (self : TRDC_MRCRef S) (r : Request)
+    : SockeyeResult Reply := do
+  let trdc_cr : (BitVec 32) <- self.trdc_mgr.get_TRDC_CR ()
   let gvldr : Bool := (BitVec.getLsbD trdc_cr 15)
-  let allowed : Bool <-
-    if gvldr then do
+  let allowed : Bool <- do
+    if gvldr then
       self.is_access_allowed r
-    else do
-      pure (r.domain_id == TRDC_MRC.ALLOWED_DEFAULT_DID)
-  let _t6 : Reply <-
-    if allowed then do
-      self.target.request r
-    else do
-      let _t5 <- SockeyeMonad.any Reply
-      pure ({ _t5 with ok := false } : Reply)
-  pure _t6
+    else
+      pure
+          (r.domain_id ==
+           (<- SockeyeEffects.get_consts).TRDC_MRC.ALLOWED_DEFAULT_DID)
+  if allowed then
+    self.target.request r
+  else
+    pure { (<- SockeyeEffects.any Reply) with ok := false }
 
 -- Module AnyRequestCpu
 
-def AnyRequestCpuRef.step (self : AnyRequestCpuRef S) : M Unit := do
-  let _t1 <- SockeyeMonad.any Request
-  let ignored : Reply <- self.downstream.request ({ _t1 with domain_id := CPU_DOMAIN_ID } : Request)
+def AnyRequestCpuRef.step (self : AnyRequestCpuRef S) (_ : Unit)
+    : SockeyeResult Unit := do
+  let ignored : Reply <-
+      self.downstream.request
+          (<- do
+              let _t1 : (BitVec 4) :=
+                  (<- SockeyeEffects.get_consts).CPU_DOMAIN_ID
+              pure { (<- SockeyeEffects.any Request) with domain_id := _t1 })
   pure ()
 
 -- Module Usb
 
-def UsbRef.step (self : UsbRef S) : M Unit := do
-  let _t1 <- SockeyeMonad.any Request
-  let ignored : Reply <- self.downstream.request ({ _t1 with domain_id := USB_DOMAIN_ID } : Request)
+def UsbRef.step (self : UsbRef S) (_ : Unit) : SockeyeResult Unit := do
+  let ignored : Reply <-
+      self.downstream.request
+          (<- do
+              let _t1 : (BitVec 4) :=
+                  (<- SockeyeEffects.get_consts).USB_DOMAIN_ID
+              pure { (<- SockeyeEffects.any Request) with domain_id := _t1 })
   pure ()
 
 -- Module Interconnect
 
-def InterconnectRef.request (self : InterconnectRef S) (r : Request) : M Reply := do
+def InterconnectRef.request (self : InterconnectRef S) (r : Request)
+    : SockeyeResult Reply := do
   let a : (BitVec 32) := r.address
-  let _t9 : Reply <-
-    if (BitVec.ule 0x80000000#32 a) then do
-      self.dram_protected_by_mrc.request r
-    else do
-      let _t8 : Reply <-
-        if ((BitVec.ule 0x4c100000#32 a) && (BitVec.ule a 0x4c1fffff#32)) then do
-          self.usb_regs.request r
-        else do
-          let _t7 : Reply <-
-            if ((BitVec.ule 0x49010000#32 a) && (BitVec.ule a 0x4902ffff#32)) then do
-              let _t5 : Reply <-
-                if (r.domain_id == CPU_DOMAIN_ID) then do
-                  self.trdc_mgr.request r
-                else do
-                  let _t4 <- SockeyeMonad.any Reply
-                  pure ({ _t4 with ok := false } : Reply)
-              pure _t5
-            else do
-              let _t6 <- SockeyeMonad.any Reply
-              pure ({ _t6 with ok := false } : Reply)
-          pure _t7
-      pure _t8
-  pure _t9
+  if (BitVec.ule 0x80000000#32 a) then
+    self.dram_protected_by_mrc.request r
+  else if ((BitVec.ule 0x4c100000#32 a) && (BitVec.ule a 0x4c1fffff#32)) then
+    self.usb_regs.request r
+  else if ((BitVec.ule 0x49010000#32 a) && (BitVec.ule a 0x4902ffff#32)) then
+    if (r.domain_id == (<- SockeyeEffects.get_consts).CPU_DOMAIN_ID) then
+      self.trdc_mgr.request r
+    else
+      pure { (<- SockeyeEffects.any Reply) with ok := false }
+  else
+    pure { (<- SockeyeEffects.any Reply) with ok := false }
 
 -- Module System
 
-def SystemRef.reset (self : SystemRef S) : M Unit := do
-  self.trdc_mgr.reset
-  pure ()
+def SystemRef.reset (self : SystemRef S) (_ : Unit) : SockeyeResult Unit := do
+  self.trdc_mgr.reset ()
 
-def SystemRef.step (self : SystemRef S) : M Unit := do
-  let _t1 <- SockeyeMonad.any Bool
-  if _t1 then do
-    self.cpu.step
-    pure ()
-  else do
-    self.usb.step
-    pure ()
-  pure ()
+def SystemRef.step (self : SystemRef S) (_ : Unit) : SockeyeResult Unit := do
+  if (<- SockeyeEffects.any Bool) then
+    self.cpu.step ()
+  else
+    self.usb.step ()
 
 -- Module Main
 
-def MainRef.cpu_write (self : MainRef S) (a : PhysAddr) (v : (BitVec 32)) : M Unit := do
-  let reply : Reply <- self.system.interconnect.request ({ address := a, value := v, mode := AccessMode.write, domain_id := CPU_DOMAIN_ID } : Request)
-  SockeyeMonad.assert reply.ok "reply.ok"
-  pure ()
+def MainRef.cpu_write (self : MainRef S) (a : PhysAddr) (v : (BitVec 32))
+    : SockeyeResult Unit := do
+  let reply : Reply <-
+      self.system.interconnect.request
+          { address := a,
+            value := v,
+            mode := AccessMode.write,
+            domain_id := (<- SockeyeEffects.get_consts).CPU_DOMAIN_ID }
+  SockeyeEffects.assert reply.ok "reply.ok"
 
-def MainRef.reg_addr (self : MainRef S) (o : RegisterOffset) : M PhysAddr := do
+def MainRef.reg_addr (self : MainRef S) (o : RegisterOffset)
+    : SockeyeResult PhysAddr := do
   pure (0x49010000#32 + (0#15 ++ o))
 
-def MainRef.set_region (self : MainRef S) (d : DomainID) (r : RegisterOffset) (first : PhysAddr) (last : PhysAddr) (mracsel : (BitVec 3)) : M Unit := do
+def MainRef.set_region (self : MainRef S) (d : DomainID) (r : RegisterOffset)
+    (first : PhysAddr) (last : PhysAddr) (mracsel : (BitVec 3))
+    : SockeyeResult Unit := do
   let d17 : (BitVec 17) := (0#13 ++ d)
-  let _t1 <- self.system.trdc_mgr.offset_MRC0_DOMd_RGDr_Ww d17 r 0#17
-  let _t2 <- self.reg_addr _t1
-  self.cpu_write _t2 ((first &&& 0xffffc000#32) ||| (0#29 ++ mracsel))
-  let _t3 <- self.system.trdc_mgr.offset_MRC0_DOMd_RGDr_Ww d17 r 1#17
-  let _t4 <- self.reg_addr _t3
-  self.cpu_write _t4 ((last &&& 0xffffc000#32) ||| 0x1#32)
+  self.cpu_write
+      (<- self.reg_addr
+          (<- self.system.trdc_mgr.offset_MRC0_DOMd_RGDr_Ww d17 r 0#17))
+      ((first &&& 0xffffc000#32) ||| (0#29 ++ mracsel))
+  self.cpu_write
+      (<- self.reg_addr
+          (<- self.system.trdc_mgr.offset_MRC0_DOMd_RGDr_Ww d17 r 1#17))
+      ((last &&& 0xffffc000#32) ||| 0x1#32)
+
+def MainRef.common_config (self : MainRef S) (_ : Unit)
+    : SockeyeResult Unit := do
+  self.cpu_write
+      (<- self.reg_addr (<- self.system.trdc_mgr.offset_MRC0_GLBACn 0#17))
+      0x7#32
+  self.cpu_write
+      (<- self.reg_addr (<- self.system.trdc_mgr.offset_MRC0_GLBACn 1#17))
+      0x6#32
+  self.set_region
+      (<- SockeyeEffects.get_consts).CPU_DOMAIN_ID
+      0#17
+      0x80000000#32
+      0xffffffff#32
+      0#3
+
+def MainRef.enable_trdc (self : MainRef S) (_ : Unit) : SockeyeResult Unit := do
+  self.cpu_write
+      (<- self.reg_addr (<- self.system.trdc_mgr.offset_TRDC_CR ()))
+      0x8000#32
+
+def MainRef.good_config (self : MainRef S) (_ : Unit) : SockeyeResult Unit := do
+  self.common_config ()
+  self.set_region
+      (<- SockeyeEffects.get_consts).USB_DOMAIN_ID
+      0#17
+      (<- SockeyeEffects.get_consts).Main.DMA_FIRST
+      (<- SockeyeEffects.get_consts).Main.DMA_LAST
+      1#3
+  self.enable_trdc ()
+
+def MainRef.bad_config (self : MainRef S) (_ : Unit) : SockeyeResult Unit := do
+  self.common_config ()
+  self.set_region
+      (<- SockeyeEffects.get_consts).USB_DOMAIN_ID
+      0#17
+      0x80000000#32
+      0xffffffff#32
+      1#3
+  self.enable_trdc ()
+
+def MainRef.check_linux_protected (self : MainRef S) (_ : Unit)
+    : SockeyeResult Unit := do
+  let old : (Vec 31 (BitVec 8)) <- self.system.dram.backing.get ()
+  self.system.usb.step ()
+  let new : (Vec 31 (BitVec 8)) <- self.system.dram.backing.get ()
+  let addr : (BitVec 31) <- SockeyeEffects.any (BitVec 31)
+  SockeyeEffects.assume (BitVec.ule addr 0xfffffff#31) "addr <= 0x0FFF_FFFFu31"
+  SockeyeEffects.assert
+      ((Vec.get old addr) == (Vec.get new addr))
+      "old[addr] == new[addr]"
+
+def MainRef.test_good_config (self : MainRef S) (_ : Unit)
+    : SockeyeResult Unit := do
+  self.system.reset ()
+  self.good_config ()
+  self.check_linux_protected ()
+
+def MainRef.test_bad_config (self : MainRef S) (_ : Unit)
+    : SockeyeResult Unit := do
+  self.system.reset ()
+  self.bad_config ()
+  self.check_linux_protected ()
+
+def MainRef.test_reset (self : MainRef S) (_ : Unit) : SockeyeResult Unit := do
+  self.system.reset ()
+  self.check_linux_protected ()
+
+def MainRef.rogue_usb_write (self : MainRef S) (a : PhysAddr)
+    : SockeyeResult Unit := do
+  let ignored : Reply <-
+      self.system.interconnect.request
+          { address := a,
+            value := 0xdeadbeef#32,
+            mode := AccessMode.write,
+            domain_id := (<- SockeyeEffects.get_consts).USB_DOMAIN_ID }
   pure ()
 
-def MainRef.common_config (self : MainRef S) : M Unit := do
-  let _t1 <- self.system.trdc_mgr.offset_MRC0_GLBACn 0#17
-  let _t2 <- self.reg_addr _t1
-  self.cpu_write _t2 0x7#32
-  let _t3 <- self.system.trdc_mgr.offset_MRC0_GLBACn 1#17
-  let _t4 <- self.reg_addr _t3
-  self.cpu_write _t4 0x6#32
-  self.set_region CPU_DOMAIN_ID 0#17 0x80000000#32 0xffffffff#32 0#3
-  pure ()
-
-def MainRef.enable_trdc (self : MainRef S) : M Unit := do
-  let _t1 <- self.system.trdc_mgr.offset_TRDC_CR
-  let _t2 <- self.reg_addr _t1
-  self.cpu_write _t2 0x8000#32
-  pure ()
-
-def MainRef.good_config (self : MainRef S) : M Unit := do
-  self.common_config
-  self.set_region USB_DOMAIN_ID 0#17 Main.DMA_FIRST Main.DMA_LAST 1#3
-  self.enable_trdc
-  pure ()
-
-def MainRef.bad_config (self : MainRef S) : M Unit := do
-  self.common_config
-  self.set_region USB_DOMAIN_ID 0#17 0x80000000#32 0xffffffff#32 1#3
-  self.enable_trdc
-  pure ()
-
-def MainRef.check_linux_protected (self : MainRef S) : M Unit := do
-  let old : (Vec 31 (BitVec 8)) <- self.system.dram.backing.get
-  self.system.usb.step
-  let new : (Vec 31 (BitVec 8)) <- self.system.dram.backing.get
-  let addr : (BitVec 31) <- SockeyeMonad.any (BitVec 31)
-  SockeyeMonad.assume (BitVec.ule addr 0xfffffff#31) "addr <= 0x0FFF_FFFFu31"
-  SockeyeMonad.assert ((old addr) == (new addr)) "old[addr] == new[addr]"
-  pure ()
-
-def MainRef.test_good_config (self : MainRef S) : M Unit := do
-  self.system.reset
-  self.good_config
-  self.check_linux_protected
-  pure ()
-
-def MainRef.test_bad_config (self : MainRef S) : M Unit := do
-  self.system.reset
-  self.bad_config
-  self.check_linux_protected
-  pure ()
-
-def MainRef.test_reset (self : MainRef S) : M Unit := do
-  self.system.reset
-  self.check_linux_protected
-  pure ()
-
-def MainRef.rogue_usb_write (self : MainRef S) (a : PhysAddr) : M Unit := do
-  let ignored : Reply <- self.system.interconnect.request ({ address := a, value := 0xdeadbeef#32, mode := AccessMode.write, domain_id := USB_DOMAIN_ID } : Request)
-  pure ()
-
-def MainRef.check_linux_protected_from_one_write (self : MainRef S) : M Unit := do
+def MainRef.check_linux_protected_from_one_write (self : MainRef S) (_ : Unit)
+    : SockeyeResult Unit := do
   let old : (BitVec 8) <- self.system.dram.backing.load 0x1000#31
   self.rogue_usb_write 0x80001000#32
   let new : (BitVec 8) <- self.system.dram.backing.load 0x1000#31
-  SockeyeMonad.assert (old == new) "old == new"
-  pure ()
+  SockeyeEffects.assert (old == new) "old == new"
 
-def MainRef.test_good_config_one_write_succeeds (self : MainRef S) : M Unit := do
-  self.system.reset
-  self.good_config
-  self.check_linux_protected_from_one_write
-  pure ()
+def MainRef.test_good_config_one_write_succeeds (self : MainRef S) (_ : Unit)
+    : SockeyeResult Unit := do
+  self.system.reset ()
+  self.good_config ()
+  self.check_linux_protected_from_one_write ()
 
-def MainRef.test_bad_config_one_write_fails (self : MainRef S) : M Unit := do
-  self.system.reset
-  self.bad_config
-  self.check_linux_protected_from_one_write
-  pure ()
+def MainRef.test_bad_config_one_write_fails (self : MainRef S) (_ : Unit)
+    : SockeyeResult Unit := do
+  self.system.reset ()
+  self.bad_config ()
+  self.check_linux_protected_from_one_write ()
 
 end Functions
 
-/-! ## Instances, with their callees wired up -/
-
-def Instances.main.system.dram {S : Type} (root : Lens S MainState) : DramRef S where
-  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_dram)
-  backing := { _lens := (((root.compose MainState.lens_system).compose SystemState.lens_dram).compose DramState.lens_backing) }
-
-def Instances.main.system.usb_regs {S : Type} (root : Lens S MainState) : GenericSinkRef S where
-  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_usb_regs)
-
-def Instances.main.system.trdc_mgr {S : Type} (root : Lens S MainState) : TRDC_MGRRef S where
-  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_trdc_mgr)
-  raw_regs := { _lens := (((root.compose MainState.lens_system).compose SystemState.lens_trdc_mgr).compose TRDC_MGRState.lens_raw_regs) }
-
-def Instances.main.system.mrc {S : Type} (root : Lens S MainState) : TRDC_MRCRef S where
-  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_mrc)
-  trdc_mgr := (Instances.main.system.trdc_mgr root)
-  target := { request := DramRef.request (Instances.main.system.dram root) }
-
-def Instances.main.system.interconnect {S : Type} (root : Lens S MainState) : InterconnectRef S where
-  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_interconnect)
-  dram_protected_by_mrc := { request := TRDC_MRCRef.request (Instances.main.system.mrc root) }
-  usb_regs := { request := GenericSinkRef.request (Instances.main.system.usb_regs root) }
-  trdc_mgr := { request := TRDC_MGRRef.request (Instances.main.system.trdc_mgr root) }
-
-def Instances.main.system.usb {S : Type} (root : Lens S MainState) : UsbRef S where
-  _lens := ((root.compose MainState.lens_system).compose SystemState.lens_usb)
-  downstream := { request := InterconnectRef.request (Instances.main.system.interconnect root) }
-
-def Instances.main.cpu {S : Type} (root : Lens S MainState) : AnyRequestCpuRef S where
-  _lens := (root.compose MainState.lens_cpu)
-  downstream := { request := InterconnectRef.request (Instances.main.system.interconnect root) }
-
-def Instances.main.system {S : Type} (root : Lens S MainState) : SystemRef S where
-  _lens := (root.compose MainState.lens_system)
-  dram := (Instances.main.system.dram root)
-  usb_regs := (Instances.main.system.usb_regs root)
-  trdc_mgr := (Instances.main.system.trdc_mgr root)
-  mrc := (Instances.main.system.mrc root)
-  interconnect := (Instances.main.system.interconnect root)
-  usb := (Instances.main.system.usb root)
-  cpu := { step := AnyRequestCpuRef.step (Instances.main.cpu root) }
-
-def Instances.main {S : Type} (root : Lens S MainState) : MainRef S where
-  _lens := root
-  system := (Instances.main.system root)
-  cpu := (Instances.main.cpu root)
+/-! ## Boilerplate that wires up the instances and runs the scenarios -/
 
 
-/-! ## Tests: scenarios of `Main` -/
+/-! ### Lenses -/
 
-/-- Runs a scenario of `Main` from the default initial state. -/
-def Main.runScenario (scenario : MainRef MainState -> ExecM MainState Unit)
-    (seed : Nat := 0) : ExecResult Unit :=
-  _root_.runScenario scenario (Instances.main Lens.id) {} seed
+def DramState.lens_backing : Lens DramState (Vec 31 Byte) where
+  get := fun s => s.backing
+  set := fun s v => { s with backing := v }
+
+def TRDC_MGRState.lens_raw_regs : Lens TRDC_MGRState (Vec 15 (BitVec 32)) where
+  get := fun s => s.raw_regs
+  set := fun s v => { s with raw_regs := v }
+
+def SystemState.lens_dram : Lens SystemState DramState where
+  get := fun s => s.dram
+  set := fun s v => { s with dram := v }
+
+def SystemState.lens_usb_regs : Lens SystemState GenericSinkState where
+  get := fun s => s.usb_regs
+  set := fun s v => { s with usb_regs := v }
+
+def SystemState.lens_trdc_mgr : Lens SystemState TRDC_MGRState where
+  get := fun s => s.trdc_mgr
+  set := fun s v => { s with trdc_mgr := v }
+
+def SystemState.lens_mrc : Lens SystemState TRDC_MRCState where
+  get := fun s => s.mrc
+  set := fun s v => { s with mrc := v }
+
+def SystemState.lens_interconnect : Lens SystemState InterconnectState where
+  get := fun s => s.interconnect
+  set := fun s v => { s with interconnect := v }
+
+def SystemState.lens_usb : Lens SystemState UsbState where
+  get := fun s => s.usb
+  set := fun s v => { s with usb := v }
+
+def MainState.lens_system : Lens MainState SystemState where
+  get := fun s => s.system
+  set := fun s v => { s with system := v }
+
+def MainState.lens_cpu : Lens MainState AnyRequestCpuState where
+  get := fun s => s.cpu
+  set := fun s v => { s with cpu := v }
+
+
+/-! ### Builders -/
+
+/-- The `Ref` of an instance of `Dram` as a function of the path through which
+    it is accessed, and the `Builder`s of its sub-instances. -/
+structure DramBuilder (S : Type) where
+  _build : String -> DramRef S
+
+/-- The `Ref` of an instance of `GenericSink` as a function of the path through
+    which it is accessed, and the `Builder`s of its sub-instances. -/
+structure GenericSinkBuilder (S : Type) where
+  _build : String -> GenericSinkRef S
+
+/-- The `Ref` of an instance of `TRDC_MGR` as a function of the path through
+    which it is accessed, and the `Builder`s of its sub-instances. -/
+structure TRDC_MGRBuilder (S : Type) where
+  _build : String -> TRDC_MGRRef S
+
+/-- The `Ref` of an instance of `TRDC_MRC` as a function of the path through
+    which it is accessed, and the `Builder`s of its sub-instances. -/
+structure TRDC_MRCBuilder (S : Type) where
+  _build : String -> TRDC_MRCRef S
+
+/-- The targets of the callees of an instance of `TRDC_MRC` and of the instances
+    below it that `TRDC_MRC` does not connect itself: for a callee of a
+    user-defined type, its implementation as a function of the path through
+    which the callee is accessed. -/
+structure UnwiredCalleesOfTRDC_MRC (S : Type) where
+  target : String -> Handler S
+  trdc_mgr : String -> TRDC_MGRInterface S
+
+/-- The `Ref` of an instance of `AnyRequestCpu` as a function of the path
+    through which it is accessed, and the `Builder`s of its sub-instances. -/
+structure AnyRequestCpuBuilder (S : Type) where
+  _build : String -> AnyRequestCpuRef S
+
+/-- The targets of the callees of an instance of `AnyRequestCpu` and of the
+    instances below it that `AnyRequestCpu` does not connect itself: for a
+    callee of a user-defined type, its implementation as a function of the path
+    through which the callee is accessed. -/
+structure UnwiredCalleesOfAnyRequestCpu (S : Type) where
+  downstream : String -> Handler S
+
+/-- The `Ref` of an instance of `Usb` as a function of the path through which it
+    is accessed, and the `Builder`s of its sub-instances. -/
+structure UsbBuilder (S : Type) where
+  _build : String -> UsbRef S
+
+/-- The targets of the callees of an instance of `Usb` and of the instances
+    below it that `Usb` does not connect itself: for a callee of a user-defined
+    type, its implementation as a function of the path through which the callee
+    is accessed. -/
+structure UnwiredCalleesOfUsb (S : Type) where
+  downstream : String -> Handler S
+
+/-- The `Ref` of an instance of `Interconnect` as a function of the path through
+    which it is accessed, and the `Builder`s of its sub-instances. -/
+structure InterconnectBuilder (S : Type) where
+  _build : String -> InterconnectRef S
+
+/-- The targets of the callees of an instance of `Interconnect` and of the
+    instances below it that `Interconnect` does not connect itself: for a callee
+    of a user-defined type, its implementation as a function of the path through
+    which the callee is accessed. -/
+structure UnwiredCalleesOfInterconnect (S : Type) where
+  dram_protected_by_mrc : String -> Handler S
+  trdc_mgr : String -> Handler S
+  usb_regs : String -> Handler S
+
+/-- The `Ref` of an instance of `System` as a function of the path through which
+    it is accessed, and the `Builder`s of its sub-instances. -/
+structure SystemBuilder (S : Type) where
+  _build : String -> SystemRef S
+  dram : DramBuilder S
+  usb_regs : GenericSinkBuilder S
+  trdc_mgr : TRDC_MGRBuilder S
+  mrc : TRDC_MRCBuilder S
+  interconnect : InterconnectBuilder S
+  usb : UsbBuilder S
+
+/-- The targets of the callees of an instance of `System` and of the instances
+    below it that `System` does not connect itself: for a callee of a
+    user-defined type, its implementation as a function of the path through
+    which the callee is accessed. -/
+structure UnwiredCalleesOfSystem (S : Type) where
+  cpu : String -> CPU S
+
+/-- The `Ref` of an instance of `Main` as a function of the path through which
+    it is accessed, and the `Builder`s of its sub-instances. -/
+structure MainBuilder (S : Type) where
+  _build : String -> MainRef S
+  system : SystemBuilder S
+  cpu : AnyRequestCpuBuilder S
+
+
+/-! ### Implementations of interfaces by modules -/
+
+/-- The implementation of `CPU` by the instance of `AnyRequestCpu` whose `Ref`
+    at the level of fuel below `r` returns, or, if there is no fuel left,
+    functions that fail an assertion, because the calls through callees are
+    nested too deeply at `path`. -/
+def AnyRequestCpuRef.asCPU {S : Type} (r : Option (Unit -> AnyRequestCpuRef S))
+    (path : String) : CPU S where
+  step := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => AnyRequestCpuRef.step (r ()) _x0
+
+/-- The implementation of `Handler` by the instance of `Dram` whose `Ref` at the
+    level of fuel below `r` returns, or, if there is no fuel left, functions
+    that fail an assertion, because the calls through callees are nested too
+    deeply at `path`. -/
+def DramRef.asHandler {S : Type} (r : Option (Unit -> DramRef S))
+    (path : String) : Handler S where
+  request := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => DramRef.request (r ()) _x0
+
+/-- The implementation of `Handler` by the instance of `GenericSink` whose `Ref`
+    at the level of fuel below `r` returns, or, if there is no fuel left,
+    functions that fail an assertion, because the calls through callees are
+    nested too deeply at `path`. -/
+def GenericSinkRef.asHandler {S : Type} (r : Option (Unit -> GenericSinkRef S))
+    (path : String) : Handler S where
+  request := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => GenericSinkRef.request (r ()) _x0
+
+/-- The implementation of `Handler` by the instance of `Interconnect` whose
+    `Ref` at the level of fuel below `r` returns, or, if there is no fuel left,
+    functions that fail an assertion, because the calls through callees are
+    nested too deeply at `path`. -/
+def InterconnectRef.asHandler {S : Type}
+    (r : Option (Unit -> InterconnectRef S)) (path : String) : Handler S where
+  request := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => InterconnectRef.request (r ()) _x0
+
+/-- The implementation of `Handler` by the instance of `TRDC_MGR` whose `Ref` at
+    the level of fuel below `r` returns, or, if there is no fuel left, functions
+    that fail an assertion, because the calls through callees are nested too
+    deeply at `path`. -/
+def TRDC_MGRRef.asHandler {S : Type} (r : Option (Unit -> TRDC_MGRRef S))
+    (path : String) : Handler S where
+  request := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.request (r ()) _x0
+
+/-- The implementation of `Handler` by the instance of `TRDC_MRC` whose `Ref` at
+    the level of fuel below `r` returns, or, if there is no fuel left, functions
+    that fail an assertion, because the calls through callees are nested too
+    deeply at `path`. -/
+def TRDC_MRCRef.asHandler {S : Type} (r : Option (Unit -> TRDC_MRCRef S))
+    (path : String) : Handler S where
+  request := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MRCRef.request (r ()) _x0
+
+/-- The implementation of `TRDC_MGRInterface` by the instance of `TRDC_MGR`
+    whose `Ref` at the level of fuel below `r` returns, or, if there is no fuel
+    left, functions that fail an assertion, because the calls through callees
+    are nested too deeply at `path`. -/
+def TRDC_MGRRef.asTRDC_MGRInterface {S : Type}
+    (r : Option (Unit -> TRDC_MGRRef S)) (path : String)
+    : TRDC_MGRInterface S where
+  read32bit_reg := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.read32bit_reg (r ()) _x0
+  offset_TRDC_CR := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.offset_TRDC_CR (r ()) _x0
+  get_TRDC_CR := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.get_TRDC_CR (r ()) _x0
+  offset_MRC0_GLBACn := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.offset_MRC0_GLBACn (r ()) _x0
+  get_MRC0_GLBACn := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.get_MRC0_GLBACn (r ()) _x0
+  offset_MRC0_DOMd_RGDr_Ww := fun _x0 _x1 _x2 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.offset_MRC0_DOMd_RGDr_Ww (r ()) _x0 _x1 _x2
+  get_MRC0_DOMd_RGDr_Ww := fun _x0 _x1 _x2 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.get_MRC0_DOMd_RGDr_Ww (r ()) _x0 _x1 _x2
+  is_register := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.is_register (r ()) _x0
+  request := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.request (r ()) _x0
+  reset := fun _x0 => match r with
+    | none => SockeyeEffects.outOfFuel path
+    | some r => TRDC_MGRRef.reset (r ()) _x0
+
+
+/-! ### Wiring of the instances of each module -/
+
+/-- The `Builder` of an instance of `Dram` whose state is at `lens`. -/
+def DramBuilder.wire {S : Type} (lens : Lens S DramState) : DramBuilder S :=
+  let build := fun (path : String) => ({
+    _lens := lens
+    backing := { _lens := (lens.compose DramState.lens_backing) }
+  } : DramRef S)
+  { _build := build }
+
+/-- The `Builder` of an instance of `GenericSink` whose state is at `lens`. -/
+def GenericSinkBuilder.wire {S : Type} (lens : Lens S GenericSinkState)
+    : GenericSinkBuilder S :=
+  let build := fun (path : String) => ({
+    _lens := lens
+  } : GenericSinkRef S)
+  { _build := build }
+
+/-- The `Builder` of an instance of `TRDC_MGR` whose state is at `lens`. -/
+def TRDC_MGRBuilder.wire {S : Type} (lens : Lens S TRDC_MGRState)
+    : TRDC_MGRBuilder S :=
+  let build := fun (path : String) => ({
+    _lens := lens
+    raw_regs := { _lens := (lens.compose TRDC_MGRState.lens_raw_regs) }
+  } : TRDC_MGRRef S)
+  { _build := build }
+
+/-- The `Builder` of an instance of `TRDC_MRC` whose state is at `lens`, and the
+    targets `unwired` of the callees that it does not connect itself. -/
+def TRDC_MRCBuilder.wire {S : Type} (lens : Lens S TRDC_MRCState)
+    (unwired : UnwiredCalleesOfTRDC_MRC S) : TRDC_MRCBuilder S :=
+  let build := fun (path : String) => ({
+    _lens := lens
+    trdc_mgr := unwired.trdc_mgr (path ++ ".trdc_mgr")
+    target := unwired.target (path ++ ".target")
+  } : TRDC_MRCRef S)
+  { _build := build }
+
+/-- The `Builder` of an instance of `AnyRequestCpu` whose state is at `lens`,
+    and the targets `unwired` of the callees that it does not connect itself. -/
+def AnyRequestCpuBuilder.wire {S : Type} (lens : Lens S AnyRequestCpuState)
+    (unwired : UnwiredCalleesOfAnyRequestCpu S) : AnyRequestCpuBuilder S :=
+  let build := fun (path : String) => ({
+    _lens := lens
+    downstream := unwired.downstream (path ++ ".downstream")
+  } : AnyRequestCpuRef S)
+  { _build := build }
+
+/-- The `Builder` of an instance of `Usb` whose state is at `lens`, and the
+    targets `unwired` of the callees that it does not connect itself. -/
+def UsbBuilder.wire {S : Type} (lens : Lens S UsbState)
+    (unwired : UnwiredCalleesOfUsb S) : UsbBuilder S :=
+  let build := fun (path : String) => ({
+    _lens := lens
+    downstream := unwired.downstream (path ++ ".downstream")
+  } : UsbRef S)
+  { _build := build }
+
+/-- The `Builder` of an instance of `Interconnect` whose state is at `lens`, and
+    the targets `unwired` of the callees that it does not connect itself. -/
+def InterconnectBuilder.wire {S : Type} (lens : Lens S InterconnectState)
+    (unwired : UnwiredCalleesOfInterconnect S) : InterconnectBuilder S :=
+  let build := fun (path : String) => ({
+    _lens := lens
+    dram_protected_by_mrc :=
+        unwired.dram_protected_by_mrc (path ++ ".dram_protected_by_mrc")
+    usb_regs := unwired.usb_regs (path ++ ".usb_regs")
+    trdc_mgr := unwired.trdc_mgr (path ++ ".trdc_mgr")
+  } : InterconnectRef S)
+  { _build := build }
+
+/-- The `Builder` of an instance of `System` whose state is at `lens`, with the
+    instance at the level of fuel below `lower`, or `none` if there is no fuel
+    left, and the targets `unwired` of the callees that it does not connect
+    itself. -/
+def SystemBuilder.wire {S : Type} (lower : Option (Unit -> SystemBuilder S))
+    (lens : Lens S SystemState) (unwired : UnwiredCalleesOfSystem S)
+    : SystemBuilder S :=
+  let dram := DramBuilder.wire (lens.compose SystemState.lens_dram)
+  let usb_regs := GenericSinkBuilder.wire
+      (lens.compose SystemState.lens_usb_regs)
+  let trdc_mgr := TRDC_MGRBuilder.wire (lens.compose SystemState.lens_trdc_mgr)
+  let mrc := TRDC_MRCBuilder.wire
+      (lens.compose SystemState.lens_mrc)
+      { target := fun path =>
+            DramRef.asHandler
+                (lower.map fun l _ => (l ()).dram._build path)
+                path,
+        trdc_mgr := fun path =>
+            TRDC_MGRRef.asTRDC_MGRInterface
+                (lower.map fun l _ => (l ()).trdc_mgr._build path)
+                path }
+  let interconnect := InterconnectBuilder.wire
+      (lens.compose SystemState.lens_interconnect)
+      { dram_protected_by_mrc := fun path =>
+            TRDC_MRCRef.asHandler
+                (lower.map fun l _ => (l ()).mrc._build path)
+                path,
+        trdc_mgr := fun path =>
+            TRDC_MGRRef.asHandler
+                (lower.map fun l _ => (l ()).trdc_mgr._build path)
+                path,
+        usb_regs := fun path =>
+            GenericSinkRef.asHandler
+                (lower.map fun l _ => (l ()).usb_regs._build path)
+                path }
+  let usb := UsbBuilder.wire
+      (lens.compose SystemState.lens_usb)
+      { downstream := fun path =>
+            InterconnectRef.asHandler
+                (lower.map fun l _ => (l ()).interconnect._build path)
+                path }
+  let build := fun (path : String) => ({
+    _lens := lens
+    dram := dram._build (path ++ ".dram")
+    usb_regs := usb_regs._build (path ++ ".usb_regs")
+    trdc_mgr := trdc_mgr._build (path ++ ".trdc_mgr")
+    mrc := mrc._build (path ++ ".mrc")
+    interconnect := interconnect._build (path ++ ".interconnect")
+    usb := usb._build (path ++ ".usb")
+    cpu := unwired.cpu (path ++ ".cpu")
+  } : SystemRef S)
+  { _build := build,
+    dram := dram,
+    usb_regs := usb_regs,
+    trdc_mgr := trdc_mgr,
+    mrc := mrc,
+    interconnect := interconnect,
+    usb := usb }
+
+/-- The `Builder` of an instance of `Main` whose state is at `lens`, with the
+    instance at the level of fuel below `lower`, or `none` if there is no fuel
+    left. -/
+def MainBuilder.wire {S : Type} (lower : Option (Unit -> MainBuilder S))
+    (lens : Lens S MainState) : MainBuilder S :=
+  let system := SystemBuilder.wire
+      (lower.map fun l _ => (l ()).system)
+      (lens.compose MainState.lens_system)
+      { cpu := fun path =>
+            AnyRequestCpuRef.asCPU
+                (lower.map fun l _ => (l ()).cpu._build path)
+                path }
+  let cpu := AnyRequestCpuBuilder.wire
+      (lens.compose MainState.lens_cpu)
+      { downstream := fun path =>
+            InterconnectRef.asHandler
+                (lower.map fun l _ => (l ()).system.interconnect._build path)
+                path }
+  let build := fun (path : String) => ({
+    _lens := lens
+    system := system._build (path ++ ".system")
+    cpu := cpu._build (path ++ ".cpu")
+  } : MainRef S)
+  { _build := build, system := system, cpu := cpu }
+
+
+/-! ### Top-level instances -/
+
+/-- The `Builder` of the top-level instance `main`, in which calls through
+    callees can be nested `fuel` deep; deeper calls fail an assertion. -/
+def Instances.main.withFuel {S : Type} (fuel : Nat) (root : Lens S MainState)
+    : MainBuilder S :=
+  Fuel.fix (fun lower => MainBuilder.wire lower root) fuel
+
+/-- The `Ref` of the top-level instance `main`, with enough fuel for the longest
+    chain of calls through callees, which has 4 such calls. -/
+def Instances.main {S : Type} (root : Lens S MainState) : MainRef S :=
+  (Instances.main.withFuel 4 root)._build "main"
+
+
+/-! ### Scenarios of `Main` -/
+
+/-- Picks a state in which `main` can start, and stores it in the state. Each
+run starts with it, right after `init_consts`, so that the initial values of
+the instances can read the constants. -/
+def init_state : SockeyeEffects (Option Consts × Option MainState) Unit := do
+  SockeyeEffects.set_instance_state (<- MainState.initial)
+
+/-- Runs a scenario of `Main`, with `source` giving the values of the `any`s:
+first those of the constants, then those of the initial state, and then those
+of the scenario. -/
+def Main.runScenario
+    (scenario : MainRef MainState -> Unit ->
+      SockeyeEffects (Option Consts × Option MainState) Unit)
+    (source : NondetSource := prngSource 0) : ExecResult Unit :=
+  (SockeyeEffects.eval
+    (do
+      init_consts
+      init_state
+      scenario (Instances.main Lens.id) ())
+    source 0 (.none, .none)).1
+
+/-- A scenario of `Main` violates no assertion, from any state in which `main`
+can start, whatever values the `any`s have. -/
+def Main.Verified
+    (scenario : MainRef MainState -> Unit ->
+      SockeyeEffects (Option Consts × Option MainState) Unit) : Prop :=
+  SockeyeEffects.wp
+    (do
+      init_consts
+      init_state
+      scenario (Instances.main Lens.id) ())
+    (fun _ _ => True) (.none, .none)
 
 /-- info: ExecResult.success () -/
 #guard_msgs in

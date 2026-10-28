@@ -40,6 +40,10 @@ def SysState.lens_model : Lens SysState MainState where
   get := fun sp => sp.2
   set := fun sp p => (sp.1, p)
 
+/-- The computations of the code translated from Sockeye, in a system with state
+`S`: the state also holds the values of the constants of the model. -/
+abbrev SysEffects (S A : Type) := SockeyeEffects (Option Consts × Option S) A
+
 /-- Whether a core address can be sent to the interconnect, whose addresses have
 32 bits. -/
 def IsPhysAddr (a : Word) : Prop := a.toNat < 2 ^ 32
@@ -48,60 +52,62 @@ instance (a : Word) : Decidable (IsPhysAddr a) :=
   inferInstanceAs (Decidable (a.toNat < 2 ^ 32))
 
 /-- The request of the core for a read (`mode := .read`) or a write of `v` to
-address `a`. Values have 32 bits on the interconnect. -/
-def coreRequest (a v : Word) (mode : AccessMode) : Request :=
+address `a`, where `c` are the constants of the model. Values have 32 bits on
+the interconnect. -/
+def coreRequest (c : Consts) (a v : Word) (mode : AccessMode) : Request :=
   { address := a.setWidth 32, value := v.setWidth 32, mode := mode,
-    domain_id := CPU_DOMAIN_ID }
+    domain_id := c.CPU_DOMAIN_ID }
 
-/-- Performs the effects `e` of the core, in any monad that the code translated
-from Sockeye can run in, and stores the core state that they end in with the
-lens `core`. Memory accesses are sent to the interconnect `ic`. An error, an
-access that the interconnect denies, and an access to an address of more than 32
-bits fail an assertion. -/
-def Effects.toM {S : Type} {M : Type -> Type} [SockeyeMonad S M]
-    (ic : InterconnectRef S) (core : Lens S State) : Effects -> M Unit
-  | .done s => core.setM s
-  | .error msg => SockeyeMonad.assert false msg
+/-- Performs the effects `e` of the core, and stores the core state that they
+end in at `core`. Memory accesses are sent to the interconnect `ic`. An error,
+an access that the interconnect denies, and an access to an address of more
+than 32 bits fail an assertion. -/
+def Effects.toSockeye {S : Type} (ic : InterconnectRef S)
+    (core : StateRef S State) : Effects -> SysEffects S Unit
+  | .done s => core.set s
+  | .error msg => SockeyeEffects.failedAssert msg
   | .mem_read a ret => do
-    SockeyeMonad.assert (decide (IsPhysAddr a)) "address of at most 32 bits"
-    let reply <- ic.request (coreRequest a 0 .read)
-    SockeyeMonad.assert reply.ok "the interconnect serves the read"
-    Effects.toM ic core (ret (reply.value.setWidth 64))
+    SockeyeEffects.assert (decide (IsPhysAddr a)) "address of at most 32 bits"
+    let c <- SockeyeEffects.get_consts
+    let reply <- ic.request (coreRequest c a 0 .read)
+    SockeyeEffects.assert reply.ok "the interconnect serves the read"
+    Effects.toSockeye ic core (ret (reply.value.setWidth 64))
   | .mem_write a v ret => do
-    SockeyeMonad.assert (decide (IsPhysAddr a)) "address of at most 32 bits"
-    let reply <- ic.request (coreRequest a v .write)
-    SockeyeMonad.assert reply.ok "the interconnect serves the write"
-    Effects.toM ic core ret
+    SockeyeEffects.assert (decide (IsPhysAddr a)) "address of at most 32 bits"
+    let c <- SockeyeEffects.get_consts
+    let reply <- ic.request (coreRequest c a v .write)
+    SockeyeEffects.assert reply.ok "the interconnect serves the write"
+    Effects.toSockeye ic core ret
 
 /-- The core as an implementation of the interface `CPU`: a step executes the
 instruction of `prog` at the program counter. -/
 def coreCpu {S : Type} (syms : Symbols) (prog : Program)
-    (ic : InterconnectRef S) (core : Lens S State) : CPU S where
-  step := do
-    let s <- core.getM
-    Effects.toM ic core (Core.step syms prog s)
+    (ic : InterconnectRef S) (core : StateRef S State) : CPU S where
+  step := fun _ => do
+    let s <- core.get ()
+    Effects.toSockeye ic core (Core.step syms prog s)
 
 /-- The system of the Sockeye model, wired up as in the Sockeye scenarios
-(`Instances.main.system`), except that its CPU is the core running `prog`. -/
+(`(Instances.main _).system`), except that its CPU is the core running
+`prog`. -/
 def system (syms : Symbols) (prog : Program) : SystemRef SysState :=
-  let model := Instances.main.system SysState.lens_model
-  { model with cpu := coreCpu syms prog model.interconnect SysState.lens_core }
+  let model := (Instances.main SysState.lens_model).system
+  { model with
+    cpu := coreCpu syms prog model.interconnect ⟨SysState.lens_core⟩ }
 
 /-! ## Running with concrete values -/
 
 /-- Runs the core in the system until its program counter is `stop`, for at most
-`fuel` steps, with `seed` determining the values that `any` picks. -/
-def Core.run (seed fuel : Nat) (syms : Symbols) (prog : Program) (stop : Word)
-    (sp : SysState) : Except String SysState :=
-  if sp.1.pc = stop then .ok sp
-  else match fuel with
-    | 0 => .error "out of fuel"
-    | fuel + 1 =>
-      match ExecM.run ((system syms prog).cpu.step : ExecM SysState Unit)
-          seed sp with
-      | (.success (), sp') => Core.run seed fuel syms prog stop sp'
-      | (.assertionFailed code, _) => .error s!"assertion failed: {code}"
-      | (.assumptionFailed code, _) => .error s!"assumption failed: {code}"
+`fuel` steps. -/
+def Core.runUntil (syms : Symbols) (prog : Program) (stop : Word) :
+    Nat -> SysEffects SysState Unit
+  | 0 => SockeyeEffects.failedAssert "the core stops within its fuel"
+  | fuel + 1 => do
+    let (s, _) <- SockeyeEffects.get_instance_state
+    if s.pc = stop then pure ()
+    else do
+      (system syms prog).cpu.step ()
+      Core.runUntil syms prog stop fuel
 
 /-- The program that holds `code` at address `base` and nothing else. -/
 def Program.ofCode (base : Word) (code : List Instr) : Program :=
@@ -156,116 +162,195 @@ def resetCore : State :=
   { regs := fun r => if r = .X30 then returnAddress else 0, flags := {},
     pc := firmwareBase }
 
-/-- Runs a firmware on the core, from reset, with the Sockeye model out of reset
-(all TRDC registers and all of DRAM zero), until it returns. -/
-def runFirmware (code : List Instr) : Except String SysState :=
-  Core.run 0 100 (fun _ => 0) (Program.ofCode firmwareBase code) returnAddress
-    (resetCore, {})
+/-- The Sockeye model out of reset: all TRDC registers and all of DRAM are
+zero. -/
+def resetModel : MainState :=
+  { system :=
+      { dram := { backing := Vec.repeat 0 31 }, usb_regs := {},
+        trdc_mgr := { raw_regs := Vec.repeat 0 15 }, mrc := {},
+        interconnect := {}, usb := {} },
+    cpu := {} }
+
+/-- Runs a firmware on the core, from reset, with the Sockeye model out of
+reset, until it returns, and then `k`. -/
+def afterFirmware {A : Type} (code : List Instr) (k : SysEffects SysState A) :
+    SysEffects SysState A := do
+  init_consts
+  SockeyeEffects.set_instance_state (resetCore, resetModel)
+  Core.runUntil (fun _ => 0) (Program.ofCode firmwareBase code) returnAddress
+    100
+  k
+
+/-- Runs `m` from the start of a run, with the values of the `any`s picked by
+the pseudo-random source with seed 0, and returns how it ended and the final
+state. -/
+def runSys {A : Type} (m : SysEffects SysState A) :
+    ExecResult A × (Option Consts × Option SysState) :=
+  m.eval (prngSource 0) 0 (.none, .none)
+
+/-- Whether a run ended with an answer. -/
+def _root_.ExecResult.succeeded {A : Type} : ExecResult A -> Bool
+  | .success _ => true
+  | _ => false
 
 /-! ## Scenarios: a rogue USB controller -/
 
 /-- Linux owns the first 256MB of DRAM, i.e. byte offsets 0 to 0x0FFFFFFF. -/
 def linuxLast : BitVec 31 := 0x0FFFFFFF
 
-/-- The USB controller writes `0xDEADBEEF` to physical address `a`. -/
-def rogueUsbWrite (a : PhysAddr) (p : MainState) : MainState :=
-  (ExecM.run ((Instances.main.system.interconnect Lens.id).request
-      { address := a, value := 0xDEADBEEF, mode := .write,
-        domain_id := USB_DOMAIN_ID }) 0 p).2
-
 /-- The word at DRAM byte offset `off`. -/
 def dramWord (p : MainState) (off : BitVec 31) : BitVec 32 :=
   let b := p.system.dram.backing
-  b (off + 3) ++ b (off + 2) ++ b (off + 1) ++ b off
+  b.get (off + 3) ++ b.get (off + 2) ++ b.get (off + 1) ++ b.get off
 
-/-- Runs a firmware, then lets the USB controller write to `0x80001000`, in
-Linux's memory, and returns the word there, or the error that stopped the
-firmware. -/
-def linuxWordAfterAttack (code : List Instr) : Except String (BitVec 32) :=
-  match runFirmware code with
-  | .ok (_, p) => .ok (dramWord (rogueUsbWrite 0x80001000 p) 0x1000)
-  | .error msg => .error msg
+/-- Runs a firmware, then lets the USB controller write `0xDEADBEEF` to
+`0x80001000`, in Linux's memory, and returns the word there. -/
+def linuxWordAfterAttack (code : List Instr) : ExecResult (BitVec 32) :=
+  (runSys (afterFirmware code do
+    (Instances.main SysState.lens_model).rogue_usb_write 0x80001000
+    let (_, p) <- SockeyeEffects.get_instance_state
+    pure (dramWord p 0x1000))).1
 
-/-- info: Except.ok 0x00000000#32 -/
+/-- info: ExecResult.success 0x00000000#32 -/
 #guard_msgs in
 #eval linuxWordAfterAttack good_firmware_code
 
-/-- info: Except.ok 0xdeadbeef#32 -/
+/-- info: ExecResult.success 0xdeadbeef#32 -/
 #guard_msgs in
 #eval linuxWordAfterAttack bad_firmware_code
 
 /-- The firmware ends where it should, with the TRDC enabled. -/
-def firmwareResult (code : List Instr) : Except String (Prod Word (BitVec 32)) :=
-  match runFirmware code with
-  | .ok (s, p) => .ok (s.pc, p.system.trdc_mgr.raw_regs 0)
-  | .error msg => .error msg
+def firmwareResult (code : List Instr) : ExecResult (Prod Word (BitVec 32)) :=
+  (runSys (afterFirmware code do
+    let (s, p) <- SockeyeEffects.get_instance_state
+    pure (s.pc, p.system.trdc_mgr.raw_regs.get 0))).1
 
-/-- info: Except.ok (0x0000000000002000#64, 0x00008000#32) -/
+/-- info: ExecResult.success (0x0000000000002000#64, 0x00008000#32) -/
 #guard_msgs in
 #eval firmwareResult good_firmware_code
 
 /-! ## Proving: Linux's memory is protected -/
 
-/-! Rules for `SpecM.wp`, the weakest precondition of the code translated from
-Sockeye, which let `simp` step through it. -/
+/-! Rules for `SockeyeEffects.wp`, the weakest precondition of the code
+translated from Sockeye, which let `simp` step through it. They are those of
+`SockeyeLib.WpLemmas` in the Sockeye repository that are needed here. -/
 
-@[simp] theorem SpecM.wp_bind {S A B : Type} (m : SpecM S A) (f : A -> SpecM S B)
-    (post : B -> S -> Prop) (s : S) :
-    SpecM.wp (m >>= f) post s =
-      SpecM.wp m (fun a s' => SpecM.wp (f a) post s') s := rfl
+@[simp] theorem SockeyeEffects.wp_bind {S A B : Type} (m : SockeyeEffects S A)
+    (f : A -> SockeyeEffects S B) (post : B -> S -> Prop) (s : S) :
+    (m >>= f).wp post s = m.wp (fun a s' => (f a).wp post s') s := by
+  induction m generalizing s with
+  | pure a => rfl
+  | getStateAndThen k ih => exact ih s s
+  | setStateAndThen s' k ih => exact ih s'
+  | anyAndThen k ih => exact forall_congr (fun x => ih x s)
+  | failedAssert code => rfl
+  | failedAssume code => rfl
 
-@[simp] theorem SpecM.wp_pure {S A : Type} (a : A) (post : A -> S -> Prop)
-    (s : S) : SpecM.wp (pure a : SpecM S A) post s = post a s := rfl
+@[simp] theorem SockeyeEffects.wp_pure {S A : Type} (a : A)
+    (post : A -> S -> Prop) (s : S) :
+    (Pure.pure a : SockeyeEffects S A).wp post s = post a s := rfl
 
-@[simp] theorem SpecM.wp_getState {S : Type} (post : S -> S -> Prop) (s : S) :
-    SpecM.wp (SockeyeMonad.getState : SpecM S S) post s = post s s := rfl
+@[simp] theorem SockeyeEffects.wp_get_consts {C S : Type} (c : C)
+    (post : C -> Option C × S -> Prop) (s : S) :
+    (SockeyeEffects.get_consts : SockeyeEffects (Option C × S) C).wp
+      post (some c, s) = post c (some c, s) := rfl
 
-@[simp] theorem SpecM.wp_setState {S : Type} (s' : S) (post : Unit -> S -> Prop)
-    (s : S) :
-    SpecM.wp (SockeyeMonad.setState s' : SpecM S Unit) post s = post () s' := rfl
+@[simp] theorem SockeyeEffects.wp_any {S A : Type} {t : SockeyeType}
+    [IsSockeyeType A t] (post : A -> S -> Prop) (s : S) :
+    (SockeyeEffects.any A).wp post s = forall (x : A), post x s := rfl
 
-@[simp] theorem SpecM.wp_any {S A : Type} [RandomVal A] (post : A -> S -> Prop)
-    (s : S) :
-    SpecM.wp (SockeyeMonad.any A : SpecM S A) post s = forall x, post x s := rfl
+/-- Unlike in `SockeyeLib.WpLemmas`, the condition `c` ends up outside of an
+`if`, so that `simp` can rewrite it without having to rewrite the `Decidable`
+instance of `c` too, which makes it time out here. -/
+@[simp] theorem SockeyeEffects.wp_ite {S A : Type} {c : Prop} [Decidable c]
+    (a b : SockeyeEffects S A) (post : A -> S -> Prop) (s : S) :
+    (if c then a else b).wp post s =
+      ((c -> a.wp post s) /\ (Not c -> b.wp post s)) := by
+  by_cases h : c <;> simp [h]
 
-@[simp] theorem SpecM.wp_ite {S A : Type} {c : Prop} [Decidable c]
-    (a b : SpecM S A) (post : A -> S -> Prop) (s : S) :
-    SpecM.wp (if c then a else b) post s =
-      if c then SpecM.wp a post s else SpecM.wp b post s := by
-  split <;> rfl
+@[simp] theorem SockeyeEffects.wp_ArrayRef_load {C S V : Type} {n : Nat}
+    (r : ArrayRef S n V) (i : BitVec n) (post : V -> C × Option S -> Prop)
+    (c : C) (s : S) :
+    SockeyeEffects.wp (r.load i) post (c, some s) =
+      post ((r._lens.get s).get i) (c, some s) := rfl
+
+@[simp] theorem SockeyeEffects.wp_ArrayRef_store {C S V : Type} {n : Nat}
+    (r : ArrayRef S n V) (i : BitVec n) (x : V)
+    (post : Unit -> C × Option S -> Prop) (c : C) (s : S) :
+    SockeyeEffects.wp (r.store i x) post (c, some s) =
+      post () (c, some (r._lens.set s ((r._lens.get s).set i x))) := rfl
+
+/-! Rules that keep the state of the model readable: `get` and `set` of the
+lenses, and reads of vectors as `Vec.get`, the form in which the statements
+below read the registers and the DRAM. -/
+
+@[simp] theorem Lens.compose_get {S P Q : Type} (l1 : Lens S P) (l2 : Lens P Q)
+    (s : S) : (l1.compose l2).get s = l2.get (l1.get s) := rfl
+
+@[simp] theorem Lens.compose_set {S P Q : Type} (l1 : Lens S P) (l2 : Lens P Q)
+    (s : S) (q : Q) :
+    (l1.compose l2).set s q = l1.set s (l2.set (l1.get s) q) := rfl
+
+@[simp] theorem Lens.id_get {S : Type} (s : S) : Lens.id.get s = s := rfl
+
+@[simp] theorem Lens.id_set {S : Type} (s s' : S) : Lens.id.set s s' = s' :=
+  rfl
+
+@[simp] theorem Vec.get_set {n : Nat} {V : Type} (v : Vec n V) (i j : BitVec n)
+    (x : V) : (v.set i x).get j = if j = i then x else v.get j := rfl
+
+/-- The values of the constants of the model, which `build_consts` picks. -/
+def theConsts : Consts :=
+  { CPU_DOMAIN_ID := 3, USB_DOMAIN_ID := 11,
+    TRDC_MGR := { BASE_ADDRESS := 0x49010000, MRC_BASE := 0x18000 },
+    TRDC_MRC := { ALLOWED_DEFAULT_DID := 3 },
+    Main := { DMA_FIRST := 0x90000000, DMA_LAST := 0x90FFFFFF } }
+
+/-- `theConsts` are the values of the constants of the model. -/
+theorem build_consts_eq {S : Type} :
+    (build_consts : SysEffects S Consts) = pure theConsts := rfl
 
 /-- Whatever request the USB controller sends, it does not change any byte of
 Linux's memory, provided that the TRDC registers that describe the regions of
 the USB controller's domain 11 hold what the good firmware writes there: region
 0 is the DMA region with the rights of `GLBAC1`, and regions 1 to 3 are not
 valid. (Index `i` of the register block is the register at byte offset `4 * i`;
-`0x62D0` is `MRC0_DOM11_RGD0_W0`.) -/
+`0x62D0` is `MRC0_DOM11_RGD0_W0`.) The constants of the model have their values
+`theConsts`, which `init_consts` stores at the start of a run. -/
 theorem usb_cannot_write_linux (p : MainState)
-    (h0 : p.system.trdc_mgr.raw_regs 0x62D0#15 = 0x90000001)
-    (h1 : p.system.trdc_mgr.raw_regs 0x62D1#15 = 0x90FFC001)
-    (h3 : p.system.trdc_mgr.raw_regs 0x62D3#15 = 0)
-    (h5 : p.system.trdc_mgr.raw_regs 0x62D5#15 = 0)
-    (h7 : p.system.trdc_mgr.raw_regs 0x62D7#15 = 0) :
-    SpecM.wp (Instances.main.system.usb Lens.id).step
-      (fun _ p' => forall a : BitVec 31, a <= linuxLast ->
-        p'.system.dram.backing a = p.system.dram.backing a) p := by
-  simp [UsbRef.step, InterconnectRef.request, TRDC_MRCRef.request,
+    (h0 : p.system.trdc_mgr.raw_regs.get 0x62D0#15 = 0x90000001)
+    (h1 : p.system.trdc_mgr.raw_regs.get 0x62D1#15 = 0x90FFC001)
+    (h3 : p.system.trdc_mgr.raw_regs.get 0x62D3#15 = 0)
+    (h5 : p.system.trdc_mgr.raw_regs.get 0x62D5#15 = 0)
+    (h7 : p.system.trdc_mgr.raw_regs.get 0x62D7#15 = 0) :
+    SockeyeEffects.wp ((Instances.main Lens.id).system.usb.step ())
+      (fun _ (_, p') => forall a : BitVec 31, a <= linuxLast ->
+        p'.map (fun p' => p'.system.dram.backing.get a) =
+          some (p.system.dram.backing.get a))
+      (some theConsts, some p) := by
+  simp only [Instances.main, Instances.main.withFuel, Fuel.fix,
+    MainBuilder.wire, SystemBuilder.wire, UsbBuilder.wire,
+    InterconnectBuilder.wire, TRDC_MRCBuilder.wire, DramBuilder.wire,
+    TRDC_MGRBuilder.wire, GenericSinkBuilder.wire, AnyRequestCpuBuilder.wire,
+    Option.map]
+  simp only [InterconnectRef.asHandler, TRDC_MRCRef.asHandler,
+    DramRef.asHandler, TRDC_MGRRef.asHandler, GenericSinkRef.asHandler,
+    TRDC_MGRRef.asTRDC_MGRInterface,
+    UsbRef.step, InterconnectRef.request, TRDC_MRCRef.request,
     TRDC_MRCRef.is_access_allowed, TRDC_MRCRef.is_region_hit,
     TRDC_MRCRef.is_access_allowed_by_region, TRDC_MRCRef.is_allowed_by_glbac,
     TRDC_MGRRef.get_TRDC_CR, TRDC_MGRRef.offset_TRDC_CR,
     TRDC_MGRRef.read32bit_reg, TRDC_MGRRef.get_MRC0_DOMd_RGDr_Ww,
     TRDC_MGRRef.offset_MRC0_DOMd_RGDr_Ww, TRDC_MGRRef.get_MRC0_GLBACn,
-    TRDC_MGRRef.offset_MRC0_GLBACn, TRDC_MGR.MRC_BASE,
-    DramRef.request, GenericSinkRef.request,
-    ArrayRef.load, ArrayRef.store, Lens.getM, Lens.modifyM, Lens.compose,
-    Lens.id, Vec.set,
-    Instances.main.system.usb, Instances.main.system.interconnect,
-    Instances.main.system.mrc, Instances.main.system.trdc_mgr,
-    Instances.main.system.dram, Instances.main.system.usb_regs,
+    TRDC_MGRRef.offset_MRC0_GLBACn, DramRef.request, GenericSinkRef.request,
+    SockeyeEffects.wp_bind, SockeyeEffects.wp_get_consts,
+    SockeyeEffects.wp_pure, SockeyeEffects.wp_any, SockeyeEffects.wp_ite,
+    SockeyeEffects.wp_ArrayRef_load, SockeyeEffects.wp_ArrayRef_store,
+    theConsts]
+  simp only [Lens.compose_get, Lens.compose_set, Lens.id_get, Lens.id_set,
     MainState.lens_system, SystemState.lens_trdc_mgr, SystemState.lens_dram,
-    TRDC_MGRState.lens_raw_regs, DramState.lens_backing,
-    USB_DOMAIN_ID, CPU_DOMAIN_ID, TRDC_MRC.ALLOWED_DEFAULT_DID,
-    h0, h1, h3, h5, h7]
+    TRDC_MGRState.lens_raw_regs, DramState.lens_backing]
+  simp [h0, h1, h3, h5, h7]
   intro x _ _ hlo hhi _ _ a ha
   -- The USB controller can only write in the DMA region, which none of the
   -- four bytes written overlaps with Linux's memory.
@@ -285,29 +370,30 @@ theorem usb_cannot_write_linux (p : MainState)
 
 /-- The state of the Sockeye model after the good firmware has run. -/
 def goodPlatform : MainState :=
-  match runFirmware good_firmware_code with
-  | .ok (_, p) => p
-  | .error _ => {}
+  match (runSys (afterFirmware good_firmware_code (pure ()))).2.2 with
+  | some (_, p) => p
+  | none => resetModel
 
 /-- The good firmware runs without error, and leaves the TRDC registers of the
 USB controller's regions as `usb_cannot_write_linux` needs them. This is shown
 by running it. -/
 theorem good_firmware_configures_trdc :
-    (runFirmware good_firmware_code).toOption.isSome = true /\
-    goodPlatform.system.trdc_mgr.raw_regs 0x62D0#15 = 0x90000001 /\
-    goodPlatform.system.trdc_mgr.raw_regs 0x62D1#15 = 0x90FFC001 /\
-    goodPlatform.system.trdc_mgr.raw_regs 0x62D3#15 = 0 /\
-    goodPlatform.system.trdc_mgr.raw_regs 0x62D5#15 = 0 /\
-    goodPlatform.system.trdc_mgr.raw_regs 0x62D7#15 = 0 := by
+    (runSys (afterFirmware good_firmware_code (pure ()))).1.succeeded = true /\
+    goodPlatform.system.trdc_mgr.raw_regs.get 0x62D0#15 = 0x90000001 /\
+    goodPlatform.system.trdc_mgr.raw_regs.get 0x62D1#15 = 0x90FFC001 /\
+    goodPlatform.system.trdc_mgr.raw_regs.get 0x62D3#15 = 0 /\
+    goodPlatform.system.trdc_mgr.raw_regs.get 0x62D5#15 = 0 /\
+    goodPlatform.system.trdc_mgr.raw_regs.get 0x62D7#15 = 0 := by
   native_decide
 
 /-- After the good firmware, a rogue USB controller cannot change Linux's
 memory. -/
 theorem linux_protected_after_good_firmware :
-    SpecM.wp (Instances.main.system.usb Lens.id).step
-      (fun _ p' => forall a : BitVec 31, a <= linuxLast ->
-        p'.system.dram.backing a = goodPlatform.system.dram.backing a)
-      goodPlatform := by
+    SockeyeEffects.wp ((Instances.main Lens.id).system.usb.step ())
+      (fun _ (_, p') => forall a : BitVec 31, a <= linuxLast ->
+        p'.map (fun p' => p'.system.dram.backing.get a) =
+          some (goodPlatform.system.dram.backing.get a))
+      (some theConsts, some goodPlatform) := by
   obtain ⟨_, h0, h1, h3, h5, h7⟩ := good_firmware_configures_trdc
   exact usb_cannot_write_linux goodPlatform h0 h1 h3 h5 h7
 
@@ -315,9 +401,9 @@ theorem linux_protected_after_good_firmware :
 `usb_cannot_write_linux` does not apply (and the `#eval` above shows that the
 rogue write gets through). -/
 theorem bad_firmware_lets_usb_into_dram :
-    (match runFirmware bad_firmware_code with
-      | .ok (_, p) => p.system.trdc_mgr.raw_regs 0x62D0#15
-      | .error _ => 0) = 0x80000001 := by
+    (match (runSys (afterFirmware bad_firmware_code (pure ()))).2.2 with
+      | some (_, p) => p.system.trdc_mgr.raw_regs.get 0x62D0#15
+      | none => 0) = 0x80000001 := by
   native_decide
 
 end ToySys

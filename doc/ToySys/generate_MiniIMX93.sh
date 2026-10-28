@@ -7,4 +7,5 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 sockeye_dir="$script_dir/../../sockeye"
 
 cd "$sockeye_dir"
-cargo run --quiet -- -b lean examples/mini_imx93.soc -o "$script_dir/MiniIMX93.lean"
+cargo run --quiet -- -b lean --lean-prelude inline examples/mini_imx93.soc \
+  -o "$script_dir/MiniIMX93.lean"
