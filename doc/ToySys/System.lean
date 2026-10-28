@@ -1,5 +1,6 @@
 import ISA
 import MiniIMX93
+import SockeyeLib.WpLemmas
 
 /-!
 # A core of `ISA.lean` on the toy i.MX 93 of `MiniIMX93.lean`
@@ -201,7 +202,7 @@ def linuxLast : BitVec 31 := 0x0FFFFFFF
 /-- The word at DRAM byte offset `off`. -/
 def dramWord (p : MainState) (off : BitVec 31) : BitVec 32 :=
   let b := p.system.dram.backing
-  b.get (off + 3) ++ b.get (off + 2) ++ b.get (off + 1) ++ b.get off
+  b (off + 3) ++ b (off + 2) ++ b (off + 1) ++ b off
 
 /-- Runs a firmware, then lets the USB controller write `0xDEADBEEF` to
 `0x80001000`, in Linux's memory, and returns the word there. -/
@@ -223,7 +224,7 @@ def linuxWordAfterAttack (code : List Instr) : ExecResult (BitVec 32) :=
 def firmwareResult (code : List Instr) : ExecResult (Prod Word (BitVec 32)) :=
   (runSys (afterFirmware code do
     let (s, p) <- SockeyeEffects.get_instance_state
-    pure (s.pc, p.system.trdc_mgr.raw_regs.get 0))).1
+    pure (s.pc, p.system.trdc_mgr.raw_regs 0))).1
 
 /-- info: ExecResult.success (0x0000000000002000#64, 0x00008000#32) -/
 #guard_msgs in
@@ -231,58 +232,8 @@ def firmwareResult (code : List Instr) : ExecResult (Prod Word (BitVec 32)) :=
 
 /-! ## Proving: Linux's memory is protected -/
 
-/-! Rules for `SockeyeEffects.wp`, the weakest precondition of the code
-translated from Sockeye, which let `simp` step through it. They are those of
-`SockeyeLib.WpLemmas` in the Sockeye repository that are needed here. -/
-
-@[simp] theorem SockeyeEffects.wp_bind {S A B : Type} (m : SockeyeEffects S A)
-    (f : A -> SockeyeEffects S B) (post : B -> S -> Prop) (s : S) :
-    (m >>= f).wp post s = m.wp (fun a s' => (f a).wp post s') s := by
-  induction m generalizing s with
-  | pure a => rfl
-  | getStateAndThen k ih => exact ih s s
-  | setStateAndThen s' k ih => exact ih s'
-  | anyAndThen k ih => exact forall_congr (fun x => ih x s)
-  | failedAssert code => rfl
-  | failedAssume code => rfl
-
-@[simp] theorem SockeyeEffects.wp_pure {S A : Type} (a : A)
-    (post : A -> S -> Prop) (s : S) :
-    (Pure.pure a : SockeyeEffects S A).wp post s = post a s := rfl
-
-@[simp] theorem SockeyeEffects.wp_get_consts {C S : Type} (c : C)
-    (post : C -> Option C × S -> Prop) (s : S) :
-    (SockeyeEffects.get_consts : SockeyeEffects (Option C × S) C).wp
-      post (some c, s) = post c (some c, s) := rfl
-
-@[simp] theorem SockeyeEffects.wp_any {S A : Type} {t : SockeyeType}
-    [IsSockeyeType A t] (post : A -> S -> Prop) (s : S) :
-    (SockeyeEffects.any A).wp post s = forall (x : A), post x s := rfl
-
-/-- Unlike in `SockeyeLib.WpLemmas`, the condition `c` ends up outside of an
-`if`, so that `simp` can rewrite it without having to rewrite the `Decidable`
-instance of `c` too, which makes it time out here. -/
-@[simp] theorem SockeyeEffects.wp_ite {S A : Type} {c : Prop} [Decidable c]
-    (a b : SockeyeEffects S A) (post : A -> S -> Prop) (s : S) :
-    (if c then a else b).wp post s =
-      ((c -> a.wp post s) /\ (Not c -> b.wp post s)) := by
-  by_cases h : c <;> simp [h]
-
-@[simp] theorem SockeyeEffects.wp_ArrayRef_load {C S V : Type} {n : Nat}
-    (r : ArrayRef S n V) (i : BitVec n) (post : V -> C × Option S -> Prop)
-    (c : C) (s : S) :
-    SockeyeEffects.wp (r.load i) post (c, some s) =
-      post ((r._lens.get s).get i) (c, some s) := rfl
-
-@[simp] theorem SockeyeEffects.wp_ArrayRef_store {C S V : Type} {n : Nat}
-    (r : ArrayRef S n V) (i : BitVec n) (x : V)
-    (post : Unit -> C × Option S -> Prop) (c : C) (s : S) :
-    SockeyeEffects.wp (r.store i x) post (c, some s) =
-      post () (c, some (r._lens.set s ((r._lens.get s).set i x))) := rfl
-
 /-! Rules that keep the state of the model readable: `get` and `set` of the
-lenses, and reads of vectors as `Vec.get`, the form in which the statements
-below read the registers and the DRAM. -/
+lenses. -/
 
 @[simp] theorem Lens.compose_get {S P Q : Type} (l1 : Lens S P) (l2 : Lens P Q)
     (s : S) : (l1.compose l2).get s = l2.get (l1.get s) := rfl
@@ -295,9 +246,6 @@ below read the registers and the DRAM. -/
 
 @[simp] theorem Lens.id_set {S : Type} (s s' : S) : Lens.id.set s s' = s' :=
   rfl
-
-@[simp] theorem Vec.get_set {n : Nat} {V : Type} (v : Vec n V) (i j : BitVec n)
-    (x : V) : (v.set i x).get j = if j = i then x else v.get j := rfl
 
 /-- The values of the constants of the model, which `build_consts` picks. -/
 def theConsts : Consts :=
@@ -318,15 +266,15 @@ valid. (Index `i` of the register block is the register at byte offset `4 * i`;
 `0x62D0` is `MRC0_DOM11_RGD0_W0`.) The constants of the model have their values
 `theConsts`, which `init_consts` stores at the start of a run. -/
 theorem usb_cannot_write_linux (p : MainState)
-    (h0 : p.system.trdc_mgr.raw_regs.get 0x62D0#15 = 0x90000001)
-    (h1 : p.system.trdc_mgr.raw_regs.get 0x62D1#15 = 0x90FFC001)
-    (h3 : p.system.trdc_mgr.raw_regs.get 0x62D3#15 = 0)
-    (h5 : p.system.trdc_mgr.raw_regs.get 0x62D5#15 = 0)
-    (h7 : p.system.trdc_mgr.raw_regs.get 0x62D7#15 = 0) :
+    (h0 : p.system.trdc_mgr.raw_regs 0x62D0#15 = 0x90000001)
+    (h1 : p.system.trdc_mgr.raw_regs 0x62D1#15 = 0x90FFC001)
+    (h3 : p.system.trdc_mgr.raw_regs 0x62D3#15 = 0)
+    (h5 : p.system.trdc_mgr.raw_regs 0x62D5#15 = 0)
+    (h7 : p.system.trdc_mgr.raw_regs 0x62D7#15 = 0) :
     SockeyeEffects.wp ((Instances.main Lens.id).system.usb.step ())
       (fun _ (_, p') => forall a : BitVec 31, a <= linuxLast ->
-        p'.map (fun p' => p'.system.dram.backing.get a) =
-          some (p.system.dram.backing.get a))
+        p'.map (fun p' => p'.system.dram.backing a) =
+          some (p.system.dram.backing a))
       (some theConsts, some p) := by
   simp only [Instances.main, Instances.main.withFuel, Fuel.fix,
     MainBuilder.wire, SystemBuilder.wire, UsbBuilder.wire,
@@ -350,7 +298,7 @@ theorem usb_cannot_write_linux (p : MainState)
   simp only [Lens.compose_get, Lens.compose_set, Lens.id_get, Lens.id_set,
     MainState.lens_system, SystemState.lens_trdc_mgr, SystemState.lens_dram,
     TRDC_MGRState.lens_raw_regs, DramState.lens_backing]
-  simp [h0, h1, h3, h5, h7]
+  simp [Vec.set, h0, h1, h3, h5, h7]
   intro x _ _ hlo hhi _ _ a ha
   -- The USB controller can only write in the DMA region, which none of the
   -- four bytes written overlaps with Linux's memory.
@@ -379,11 +327,11 @@ USB controller's regions as `usb_cannot_write_linux` needs them. This is shown
 by running it. -/
 theorem good_firmware_configures_trdc :
     (runSys (afterFirmware good_firmware_code (pure ()))).1.succeeded = true /\
-    goodPlatform.system.trdc_mgr.raw_regs.get 0x62D0#15 = 0x90000001 /\
-    goodPlatform.system.trdc_mgr.raw_regs.get 0x62D1#15 = 0x90FFC001 /\
-    goodPlatform.system.trdc_mgr.raw_regs.get 0x62D3#15 = 0 /\
-    goodPlatform.system.trdc_mgr.raw_regs.get 0x62D5#15 = 0 /\
-    goodPlatform.system.trdc_mgr.raw_regs.get 0x62D7#15 = 0 := by
+    goodPlatform.system.trdc_mgr.raw_regs 0x62D0#15 = 0x90000001 /\
+    goodPlatform.system.trdc_mgr.raw_regs 0x62D1#15 = 0x90FFC001 /\
+    goodPlatform.system.trdc_mgr.raw_regs 0x62D3#15 = 0 /\
+    goodPlatform.system.trdc_mgr.raw_regs 0x62D5#15 = 0 /\
+    goodPlatform.system.trdc_mgr.raw_regs 0x62D7#15 = 0 := by
   native_decide
 
 /-- After the good firmware, a rogue USB controller cannot change Linux's
@@ -391,8 +339,8 @@ memory. -/
 theorem linux_protected_after_good_firmware :
     SockeyeEffects.wp ((Instances.main Lens.id).system.usb.step ())
       (fun _ (_, p') => forall a : BitVec 31, a <= linuxLast ->
-        p'.map (fun p' => p'.system.dram.backing.get a) =
-          some (goodPlatform.system.dram.backing.get a))
+        p'.map (fun p' => p'.system.dram.backing a) =
+          some (goodPlatform.system.dram.backing a))
       (some theConsts, some goodPlatform) := by
   obtain ⟨_, h0, h1, h3, h5, h7⟩ := good_firmware_configures_trdc
   exact usb_cannot_write_linux goodPlatform h0 h1 h3 h5 h7
@@ -402,7 +350,7 @@ theorem linux_protected_after_good_firmware :
 rogue write gets through). -/
 theorem bad_firmware_lets_usb_into_dram :
     (match (runSys (afterFirmware bad_firmware_code (pure ()))).2.2 with
-      | some (_, p) => p.system.trdc_mgr.raw_regs.get 0x62D0#15
+      | some (_, p) => p.system.trdc_mgr.raw_regs 0x62D0#15
       | none => 0) = 0x80000001 := by
   native_decide
 

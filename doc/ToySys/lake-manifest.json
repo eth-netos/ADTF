@@ -1,6 +1,13 @@
 {"version": "1.2.0",
  "packagesDir": ".lake/packages",
- "packages": [],
+ "packages":
+ [{"type": "path",
+   "scope": "",
+   "name": "Sockeye",
+   "manifestFile": "lake-manifest.json",
+   "inherited": false,
+   "dir": "../../sockeye/lean",
+   "configFile": "lakefile.toml"}],
  "name": "ToySys",
  "lakeDir": ".lake",
  "fixedToolchain": false}

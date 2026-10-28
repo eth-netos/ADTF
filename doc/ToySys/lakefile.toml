@@ -9,3 +9,7 @@ relaxedAutoImplicit = false
 [[lean_lib]]
 name = "ToySys"
 roots = ["ISA", "MiniIMX93", "System"]
+
+[[require]]
+name = "Sockeye"
+path = "../../sockeye/lean"
