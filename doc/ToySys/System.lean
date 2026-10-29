@@ -196,35 +196,29 @@ def _root_.ExecResult.succeeded {A : Type} : ExecResult A -> Bool
 
 /-! ## Scenarios: a rogue USB controller -/
 
-/-- Linux owns the first 256MB of DRAM, i.e. byte offsets 0 to 0x0FFFFFFF. -/
-def linuxLast : BitVec 31 := 0x0FFFFFFF
+/-- Runs a firmware, then `check_linux_protected_from_one_write`: the USB
+controller writes `0xDEADBEEF` to `0x80001000`, in Linux's memory, which must
+leave the byte there unchanged. -/
+def attackAfterFirmware (code : List Instr) : ExecResult Unit :=
+  (runSys (afterFirmware code
+    ((Instances.main SysState.lens_model).check_linux_protected_from_one_write
+      ()))).1
 
-/-- The word at DRAM byte offset `off`. -/
-def dramWord (p : MainState) (off : BitVec 31) : BitVec 32 :=
-  let b := p.system.dram.backing
-  b (off + 3) ++ b (off + 2) ++ b (off + 1) ++ b off
-
-/-- Runs a firmware, then lets the USB controller write `0xDEADBEEF` to
-`0x80001000`, in Linux's memory, and returns the word there. -/
-def linuxWordAfterAttack (code : List Instr) : ExecResult (BitVec 32) :=
-  (runSys (afterFirmware code do
-    (Instances.main SysState.lens_model).rogue_usb_write 0x80001000
-    let (_, p) <- SockeyeEffects.get_instance_state
-    pure (dramWord p 0x1000))).1
-
-/-- info: ExecResult.success 0x00000000#32 -/
+/-- info: ExecResult.success () -/
 #guard_msgs in
-#eval linuxWordAfterAttack good_firmware_code
+#eval attackAfterFirmware good_firmware_code
 
-/-- info: ExecResult.success 0xdeadbeef#32 -/
+/-- info: ExecResult.assertionFailed "old == new" -/
 #guard_msgs in
-#eval linuxWordAfterAttack bad_firmware_code
+#eval attackAfterFirmware bad_firmware_code
 
-/-- The firmware ends where it should, with the TRDC enabled. -/
+/-- The firmware ends where it should, with the TRDC enabled: the program
+counter and the TRDC's register `TRDC_CR`. -/
 def firmwareResult (code : List Instr) : ExecResult (Prod Word (BitVec 32)) :=
   (runSys (afterFirmware code do
-    let (s, p) <- SockeyeEffects.get_instance_state
-    pure (s.pc, p.system.trdc_mgr.raw_regs 0))).1
+    let (s, _) <- SockeyeEffects.get_instance_state
+    pure (s.pc,
+      <- (Instances.main SysState.lens_model).system.trdc_mgr.get_TRDC_CR ()))).1
 
 /-- info: ExecResult.success (0x0000000000002000#64, 0x00008000#32) -/
 #guard_msgs in
@@ -258,8 +252,9 @@ def theConsts : Consts :=
 theorem build_consts_eq {S : Type} :
     (build_consts : SysEffects S Consts) = pure theConsts := rfl
 
-/-- Whatever request the USB controller sends, it does not change any byte of
-Linux's memory, provided that the TRDC registers that describe the regions of
+/-- `check_linux_protected` of the model holds: whatever request the USB
+controller sends, it does not change any byte of Linux's memory (the first
+256MB of DRAM), provided that the TRDC registers that describe the regions of
 the USB controller's domain 11 hold what the good firmware writes there: region
 0 is the DMA region with the rights of `GLBAC1`, and regions 1 to 3 are not
 valid. (Index `i` of the register block is the register at byte offset `4 * i`;
@@ -271,11 +266,8 @@ theorem usb_cannot_write_linux (p : MainState)
     (h3 : p.system.trdc_mgr.raw_regs 0x62D3#15 = 0)
     (h5 : p.system.trdc_mgr.raw_regs 0x62D5#15 = 0)
     (h7 : p.system.trdc_mgr.raw_regs 0x62D7#15 = 0) :
-    SockeyeEffects.wp ((Instances.main Lens.id).system.usb.step ())
-      (fun _ (_, p') => forall a : BitVec 31, a <= linuxLast ->
-        p'.map (fun p' => p'.system.dram.backing a) =
-          some (p.system.dram.backing a))
-      (some theConsts, some p) := by
+    SockeyeEffects.wp ((Instances.main Lens.id).check_linux_protected ())
+      (fun _ _ => True) (some theConsts, some p) := by
   simp only [Instances.main, Instances.main.withFuel, Fuel.fix,
     MainBuilder.wire, SystemBuilder.wire, UsbBuilder.wire,
     InterconnectBuilder.wire, TRDC_MRCBuilder.wire, DramBuilder.wire,
@@ -284,7 +276,7 @@ theorem usb_cannot_write_linux (p : MainState)
   simp only [InterconnectRef.asHandler, TRDC_MRCRef.asHandler,
     DramRef.asHandler, TRDC_MGRRef.asHandler, GenericSinkRef.asHandler,
     TRDC_MGRRef.asTRDC_MGRInterface,
-    UsbRef.step, InterconnectRef.request, TRDC_MRCRef.request,
+    MainRef.check_linux_protected, UsbRef.step, InterconnectRef.request, TRDC_MRCRef.request,
     TRDC_MRCRef.is_access_allowed, TRDC_MRCRef.is_region_hit,
     TRDC_MRCRef.is_access_allowed_by_region, TRDC_MRCRef.is_allowed_by_glbac,
     TRDC_MGRRef.get_TRDC_CR, TRDC_MGRRef.offset_TRDC_CR,
@@ -294,16 +286,16 @@ theorem usb_cannot_write_linux (p : MainState)
     SockeyeEffects.wp_bind, SockeyeEffects.wp_get_consts,
     SockeyeEffects.wp_pure, SockeyeEffects.wp_any, SockeyeEffects.wp_ite,
     SockeyeEffects.wp_ArrayRef_load, SockeyeEffects.wp_ArrayRef_store,
-    theConsts]
+    SockeyeEffects.wp_ArrayRef_get, SockeyeEffects.wp_assume,
+    SockeyeEffects.wp_assert, theConsts]
   simp only [Lens.compose_get, Lens.compose_set, Lens.id_get, Lens.id_set,
     MainState.lens_system, SystemState.lens_trdc_mgr, SystemState.lens_dram,
     TRDC_MGRState.lens_raw_regs, DramState.lens_backing]
-  simp [Vec.set, h0, h1, h3, h5, h7]
+  simp [Vec.set, Vec.get, h0, h1, h3, h5, h7]
   intro x _ _ hlo hhi _ _ a ha
   -- The USB controller can only write in the DMA region, which none of the
   -- four bytes written overlaps with Linux's memory.
-  simp only [linuxLast] at ha
-  simp only [BitVec.ule, decide_eq_true_eq] at hlo hhi
+  simp only [BitVec.ule, decide_eq_true_eq] at hlo hhi ha
   have hoff : 0x10000000#31 <= x.address.extractLsb' 0 31 /\
       x.address.extractLsb' 0 31 <= 0x10FFFFFF#31 := by
     have : (x.address.extractLsb' 0 31).toNat = x.address.toNat % 2 ^ 31 := by
@@ -335,13 +327,10 @@ theorem good_firmware_configures_trdc :
   native_decide
 
 /-- After the good firmware, a rogue USB controller cannot change Linux's
-memory. -/
+memory (`check_linux_protected`). -/
 theorem linux_protected_after_good_firmware :
-    SockeyeEffects.wp ((Instances.main Lens.id).system.usb.step ())
-      (fun _ (_, p') => forall a : BitVec 31, a <= linuxLast ->
-        p'.map (fun p' => p'.system.dram.backing a) =
-          some (goodPlatform.system.dram.backing a))
-      (some theConsts, some goodPlatform) := by
+    SockeyeEffects.wp ((Instances.main Lens.id).check_linux_protected ())
+      (fun _ _ => True) (some theConsts, some goodPlatform) := by
   obtain ⟨_, h0, h1, h3, h5, h7⟩ := good_firmware_configures_trdc
   exact usb_cannot_write_linux goodPlatform h0 h1 h3 h5 h7
 
