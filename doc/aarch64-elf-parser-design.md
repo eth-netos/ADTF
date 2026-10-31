@@ -189,6 +189,8 @@ structure CodeSection where
 
 Open points:
 
+- The sketch does not yet keep the layout information that the round-trip
+  test of section 5 needs (raw header fields, name offsets, gaps).
 - Whether a `CodeSection` can simply be turned into a Kraken `Program`
   (`instr`, `label` and `byteArray` directives) for each section, with
   Kraken's `Labels` class providing the symbol addresses that the linker
@@ -366,7 +368,79 @@ The `undecoded` code item (section 3) remains for words the decoder does not
 recognize at all, e.g. SIMD and floating-point instructions, which do not
 occur in BL31.
 
-## 5. Decisions so far
+## 5. Round-trip testing: `encode (parse file) = file`
+
+An ELF encoder for the container layer is feasible and small: the format is
+a fixed-size file header, two tables of fixed-size entries (program headers
+and section headers) and blobs of bytes at given offsets. Writing it is
+mostly the parser in reverse. The test is: for each of the 114 object files
+(`bl31/*.o`, `libc/*.o`) and for `bl31/bl31.elf` from section 2 (784 KiB
+together), parse the file, encode the result, and
+compare the bytes with the original. The files can also be fed as one
+archive, `lib/libc.a`, once archives are supported.
+
+### 5.1 What the representation must keep for byte equality
+
+A byte-exact round trip only works if the parsed datatype keeps everything
+that is in the file, including what a linker would consider irrelevant.
+Consequences for the datatype of section 3:
+
+- Every header field is stored as read, including the ones that can usually
+  be computed: `e_ident` (class, data, OS/ABI, ABI version, padding),
+  `e_version`, `e_phoff`, `e_shoff`, `e_ehsize`, `e_phentsize`,
+  `e_shentsize`, `e_shstrndx`, and for each section `sh_name` (the offset of
+  its name in `.shstrtab`) and `sh_offset`. The encoder writes them back
+  rather than recomputing them; the parser checks that they are consistent
+  (e.g. that `name` is the string at `sh_name`).
+- The layout is not canonical: `bl31.elf` has 3 program headers right after
+  the file header at offset 64 and the first section at offset `0x1000`, and
+  its section headers at the end of the file (offset `0x17108`), with
+  alignment padding in between. So the bytes not covered by any header,
+  table or section are kept as gaps (offset and bytes), usually zeros. The
+  encoder places each blob at its stored offset and fills the rest from the
+  gaps.
+- `NOBITS` sections (`.bss`, `.stacks`, `.xlat_table` in `bl31.elf`) have a
+  size but no bytes in the file; several of them share the same `sh_offset`.
+- String tables (`.strtab`, `.shstrtab`) are kept as bytes, because a
+  linker may share suffixes between names or order them in any way; names
+  are then stored both as offset and as decoded string.
+- The symbol table and relocation sections should be encoded from their
+  parsed form (`symbols`, `relocations`), not copied from saved bytes,
+  otherwise the round trip does not test their parser. Their raw bytes are
+  then not stored, and the encoder regenerates them.
+- Sections that the parser does not interpret (e.g. `.debug_frame`,
+  `.comment`) are stored as bytes.
+
+### 5.2 A second round trip for the code layer
+
+The same idea applies to instructions: `encodeInstr (decodeInstr w) = w`
+for every word in a `$x` region. This needs an instruction encoder
+(Kraken has none; it relies on an external assembler), which is about as
+much work as the decoder and can be written from the same `sail-arm`
+encodings. It catches decoder bugs that the objdump comparison of section
+4.3 would also catch, but needs no external tool. Expected obstacles:
+
+- Encodings that Kraken's `Operation` does not distinguish, e.g. a field
+  that the architecture ignores, or two encodings of the same operation.
+  Such words need either an extra field in the decoded item or an exception
+  list in the test.
+- In object files, relocated fields hold 0 (or the addend), and the decoded
+  operand is a `ConstExpr` with a label; the encoder has to write back the
+  unrelocated value, i.e. it encodes the instruction as it is in the file,
+  not as it will be after linking.
+
+### 5.3 Where the test runs
+
+The object files are build products of `imx-atf` and are not committed. The
+test can be a Lake test executable that takes a directory and checks every
+`.o` and ELF file in it, run after building BL31 as in section 2. A few small
+object files could additionally be committed as fixtures (TF-A is
+BSD-3-Clause) so that the test also runs without the cross toolchain.
+
+Proving `parse (encode x) = some x` for all `x` would be stronger than
+testing, but is not planned for now.
+
+## 6. Decisions so far
 
 - Parse ELF64 little-endian AArch64 only.
 - Two layers: a container layer that mirrors the file, and a code layer that
@@ -379,7 +453,10 @@ occur in BL31.
   (section 4.3).
 - Instructions missing from Kraken are added to Kraken's `Operation` without
   semantics; executing them yields `Effects.unimplemented` (section 4.4).
+- An ELF encoder is written too, and `encode (parse file) = file` is tested
+  on all object files and `bl31.elf` of the i.MX 93 BL31 build; the
+  datatype keeps everything needed for byte equality (section 5).
 
-## 6. Next steps
+## 7. Next steps
 
 To be decided in the next prompts.
