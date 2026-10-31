@@ -64,19 +64,50 @@ Observations from `readelf` that matter for the design:
   `ConstExpr` already has `label`, `pg_hi21`, `lo12`, `add` and `int64`, so
   an instruction plus its relocation can become an `Operation` whose operand
   is e.g. `.pg_hi21 (.add (.label "sym") (.int64 addend))`.
-- The toolchain emits the AArch64 mapping symbols `$x` (code starts here) and
-  `$d` (data starts here); `bl31.elf` has 472 of them. They tell code apart
-  from literal pools and other data in executable sections. Without them,
-  `objdump -d` decodes the strings in `bl31.elf`'s `.ro` section as
-  instructions.
+- The toolchain emits mapping symbols (section 2.1); `bl31.elf` has 472 of
+  them.
 - Instructions in `bl31.elf` that Kraken's `Operation` does not cover yet
-  (counts from `objdump -d`, about 9,700 instructions in total): `mrs` (130),
+  (counts from `objdump -d`, which prints about 9,780 instructions plus 65
+  `.word` and 1 `.short` data items in executable sections): `mrs` (130),
   `msr` (115), `isb` (36), `dsb` (26), `dc` (7), `wfi` (7), `eret` (3),
-  `wfe` (2), and one each of `tlbi`, `sev`, `sevl`, `udf`, `ldaxr`, `stxr`,
-  `stlr`, `stlrb`, `ldarb`. Roughly 4% of the code; the rest are
+  `wfe` (2), and one each of `tlbi`, `sev`, `sevl`, `psb`, `udf`, `ldaxr`,
+  `stxr`, `stlr`, `stlrb`, `ldarb`. Roughly 4% of the code; the rest are
   integer, load/store and branch instructions that Kraken has (`objdump`
   prints aliases such as `mov`, `cmp`, `tst`, `lsl`, `ubfx`, `cset`).
   How they are handled is decided in section 4.4.
+
+### 2.1 Mapping symbols: `$x` and `$d`
+
+An executable section is just bytes; nothing in the section itself says
+which bytes are instructions. Besides instructions, compilers and
+assemblers put data into executable sections: literal pools (constants that
+an `ldr x0, =value` loads PC-relatively), jump tables of `switch`
+statements, and, in a linked file, whatever the linker script merges into
+the same output section (in `bl31.elf`, the read-only strings such as
+`"BL31: %s"` end up in the executable `.ro` section). An instruction word
+and a data word can have the same bits, so the bytes alone cannot tell them
+apart.
+
+The AArch64 ELF ABI (Arm's "ELF for the Arm 64-bit Architecture") solves
+this with mapping symbols: local symbols of type `NOTYPE` and size 0 whose
+name says what starts at their address, until the next mapping symbol in the
+same section:
+
+- `$x` (or `$x.<anything>`): A64 instructions start here.
+- `$d` (or `$d.<anything>`): data starts here.
+
+The assembler emits them automatically. `readelf -s` on `bl31_main.o` shows
+e.g. `$x` at offset 0 of each `.text.*` section, and `bl31.elf` has `$d` at
+`0x204e0170`, where `objdump -d` then prints `.word 0x5d1b0020` instead of
+an instruction, and in front of the strings in `.ro`, which it prints as a
+hex dump.
+
+They are ordinary symbols, so `strip` removes them together with all other
+symbols. On a stripped copy of `bl31.elf` (made with `aarch64-none-elf-strip`
+for this check), `objdump -d` has nothing to go by and decodes everything
+in `.ro` as instructions: 10,504 lines instead of about 9,850, among them
+609 `udf` or `.inst` lines for words that are no valid instruction, and
+plausible-looking but wrong instructions for the strings.
 
 ## 3. Lean datatype for an ELF file (first sketch)
 
@@ -89,8 +120,12 @@ Two layers:
 2. A code layer on top: the executable sections decoded into Kraken
    instructions, with relocations and symbols folded into the operands.
 
-Only ELF64, little-endian, `EM_AARCH64` (183) is accepted; anything else is
-a parse error.
+The container layer accepts ELF64 little-endian files for any machine and
+does not depend on the architecture; it lives in its own directory (or
+file), separate from the AArch64-specific code. The code layer is
+instantiated only for AArch64 for now and rejects files whose `e_machine`
+is not `EM_AARCH64` (183). Other architectures (Kraken also has x86-64)
+can be added later by instantiating the code layer for them.
 
 ```lean
 namespace Elf
@@ -209,12 +244,13 @@ An alternative is a single datatype whose executable sections hold decoded
 instructions instead of bytes. Reasons for keeping bytes in the container
 layer and computing the decoded view from them:
 
-- Code and data are not always distinguishable. The `$x`/`$d` mapping
-  symbols exist in object files and in unstripped executables, but a
-  stripped executable has no symbols at all (checked: `strip` on
-  `bl31.elf` leaves no symbol table). Literal pools, jump tables and strings
-  inside executable sections (`bl31.elf`'s `.ro` section contains strings)
-  then have to be bytes anyway.
+- Code and data cannot always be told apart (section 2.1). Executable
+  sections contain data too (literal pools, jump tables, strings), and only
+  the `$x`/`$d` mapping symbols say where. In a stripped executable there
+  are no symbols, so a datatype holding decoded instructions would have no
+  sound way to fill itself: decoding everything turns data into wrong
+  instructions. Even with mapping symbols, the data regions have to be
+  bytes, so the datatype needs bytes in executable sections anyway.
 - The ELF round trip of section 5 would depend on an exact instruction
   round trip (section 5.5): every word would have to be decoded and encoded
   back bit for bit, including encodings that Kraken's `Operation` does not
@@ -398,6 +434,74 @@ execution, so it has to skip the constructors without semantics.
 The `undecoded` code item (section 3) remains for words the decoder does not
 recognize at all, e.g. SIMD and floating-point instructions, which do not
 occur in BL31.
+
+### 4.5 Alternative without a decoder: objdump and Kraken's parser
+
+Instead of decoding instruction words in Lean, the code layer could be
+produced from the text that GNU `objdump -d -r` prints, read by Kraken's
+existing assembly parser:
+
+1. Run `objdump -d -r` on the file.
+2. A converter (Lean or a script) turns objdump's listing into assembly that
+   Kraken's parser accepts: drop addresses and raw bytes, drop objdump's
+   annotations (`<symbol>` after branch targets, `//` comments), turn each
+   section into a label per symbol plus instructions, turn data lines
+   (`.word`, hex dumps) into `byteArray` directives, and fold each
+   relocation line into the operand of the instruction above it (e.g.
+   `adrp x0, 0 <...>` with `R_AARCH64_ADR_PREL_PG_HI21 .rodata.psci_args.0`
+   becomes `adrp x0, .rodata.psci_args.0`, and the `add` with
+   `R_AARCH64_ADD_ABS_LO12_NC` becomes `add x0, x0, :lo12:.rodata.psci_args.0`).
+3. Kraken's parser produces a `Program` per section, and the instructions
+   that Kraken does not have yet (section 4.4) have to be added to its parser
+   as well as to `Operation`.
+
+This gives a code layer without writing a decoder, and Kraken's parser
+already accepts objdump's aliases. The costs:
+
+- `objdump` (and the converter) become part of what has to be trusted: a
+  proof about the resulting `Program` is about the file only as far as
+  objdump decodes it correctly. With a Lean decoder, the trusted part is a
+  Lean function that can be reviewed against `sail-arm` clause by clause.
+- Verification needs a cross toolchain at proof time, or the objdump output
+  has to be committed next to each file.
+- objdump's text format has to be followed exactly, including its quirks,
+  and it can change between binutils versions.
+
+Information that verification still needs from the ELF file itself, since
+`objdump -d -r` does not print it or prints it only as comments:
+
+- The contents of non-executable sections: initial values of `.data`,
+  constants in `.rodata` (e.g. `.rodata.psci_args.0`, which
+  `get_arm_std_svc_args` returns the address of), and the sizes of `.bss`
+  and other `NOBITS` sections. Code reads and writes them, so they belong to
+  the initial memory.
+- Relocations in data sections, e.g. `.rela.rodata.psci_args.0`: pointers
+  stored in data, such as function pointer tables, which say what an
+  indirect branch (`blr`) can reach.
+- The symbol table: sizes (where a function or object ends), bindings
+  (local, global, weak), undefined symbols (what an object file expects
+  from others), and which section each symbol is in.
+- Section attributes: flags (writable, executable), alignment, and in
+  executables the addresses; and the program headers (`PT_LOAD` segments
+  with their permissions and `memsz` vs `filesz`), which say what memory is
+  executable, writable or zero-initialized at boot. Kraken's semantics has
+  `require_exec_access`, `require_read_access` and `require_write_access`
+  effects that this would answer.
+- The entry point of an executable.
+- The connection between bytes and instructions: if a statement is about
+  the binary that is actually loaded (e.g. `bl31.bin`), the instruction
+  bytes and their addresses are needed to check that the `Program` matches
+  them.
+
+`objdump` and `readelf` can print all of these too (`-s` for contents, `-t`
+or `-s` for symbols, `-h`/`-S` and `-l` for sections and segments), but
+then the converter parses several text formats instead of one binary format,
+which is more work and more fragile than parsing the ELF container directly.
+
+A hybrid is possible: parse the ELF container in Lean (section 3), and use
+the objdump route only for decoding instruction words until the Lean decoder
+exists. The objdump route then also serves as the oracle for testing the
+decoder (section 5.6).
 
 ## 5. Round-trip testing
 
@@ -592,7 +696,9 @@ on the BL31 build directory.
 
 ## 6. Decisions so far
 
-- Parse ELF64 little-endian AArch64 only.
+- The container layer is architecture-independent (ELF64 little-endian) and
+  kept in a separate directory or file; the code layer is instantiated only
+  for AArch64 for now (section 3).
 - Two layers: a container layer that mirrors the file, and a code layer that
   decodes executable sections into Kraken instructions.
 - Section contents stay bytes in the container layer; decoded instructions
