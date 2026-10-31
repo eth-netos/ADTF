@@ -483,7 +483,58 @@ the same value can still be run with Kraken's `Program.fakeLayout` and
 `Executable.eval` for testing, and a lemma relating `Code.step` to
 `Executable.step` (if ever needed) is about the same `Program`. The cost is
 `Program.offset` and `Program.instrAt` instead of plain list indexing, a
-few lines and a slightly bigger fetch lemma.
+few lines and a slightly bigger fetch lemma. Section 1.3.3 compares this
+with a plain list of instructions.
+
+#### 1.3.3 Alternative: a list of instructions, as in ToySys
+
+Staying as close as possible to ToySys means: `objdumpAArch64` returns a
+`List Instr` (ToySys's `code`), checking and dropping the function's label,
+and `Loaded`, the fetch lemma (`code[((a - f) / 4).toNat]? = some i`),
+`step_of_fetch`, `wp_of_pc` and `instr` are ToySys's, with ToySys's
+`Instr`, `State` and `Effects` replaced by Kraken's. The only differences
+left are the ones Kraken's semantics forces: the program counter is an
+`Int64`, not a `BitVec 64`, and the effects of an instruction are Kraken's
+`Effects` with `Effects.All` instead of ToySys's `Effects.wp` on a
+platform. These are the same for section 1.3.2.
+
+For it:
+
+- `Loaded` and the fetch lemma are ToySys's; the proof for `BitVec 64`
+  should carry over to `Int64`. The address arithmetic is `(a - f) / 4`,
+  with no sum of directive sizes.
+- Proofs and specs read like ToySys's (`Loaded prog (syms "max3")
+  max3_code` there, `Loaded code (syms "longjmp") longjmp_o` here).
+- Less to explain and to trust: no `Program.offset`, no `Program.instrAt`,
+  no statement about labels.
+- For the first milestone (one label per function, at its start, no data)
+  nothing is lost.
+
+Against it:
+
+- Assembly functions can have local symbols inside them, e.g.
+  `flush_dcache_range` in `bl31/cache_helpers.o` has `<loop_civac>:` at
+  0x20 and `<exit_loop_civac>:` at 0x34, and objdump prints its branches as
+  `b.cc 20 <loop_civac>`. A `List Instr` has no place for them. The
+  elaborator can still rewrite such a target to `flush_dcache_range +
+  0x20` (it sees the label's offset in the listing), but then a beacon
+  copied from the listing contains `<loop_civac>`, and the beacon tactic
+  has to do the same rewriting from the number `20` and the function
+  symbol of its `at` address. With `Program`, `Loaded` relates
+  `loop_civac` to `syms` and nothing needs rewriting.
+- Data in code (`.word` in assembly, `byteArray`) cannot be represented;
+  such functions would be rejected (none so far).
+- Running a listing with Kraken's `Program.fakeLayout` and
+  `Executable.eval`, or relating `Code.step` to `Executable.step`, needs
+  `instrs.map .instr` first. A one-liner, but a conversion.
+- Moving to `Program` later changes the type of every `*_o` definition and
+  `Loaded`; the proofs themselves should not change, since the `instr`
+  tactic hides the fetch.
+
+Recommendation: `List Instr` for the first milestone, since its three
+functions have no internal labels, no data and no branches, and ToySys's
+proofs can be reused unchanged. Switch to `Program` (section 1.3.2) when
+the first assembly function with local symbols is verified.
 
 ### 1.4 Composability under linking (later)
 
@@ -1467,7 +1518,8 @@ end ADTF.AtfLibc.Listing
 - `--disassemble=sym` takes one symbol (with several, objdump uses only
   the last), so one file per function also means one objdump run per
   file.
-- The type is Kraken's `Program` (section 1.3.2).
+- The type is Kraken's `Program` (section 1.3.2), or `List Instr` with
+  the alternative of section 1.3.3.
 
 #### 4.7.2 The script
 
@@ -1665,8 +1717,9 @@ For the first milestone:
 - imx-atf is pinned by its submodule commit, the toolchain by a committed
   version file that the scripts check (section 4.10). CI runs the listing
   script on a clean checkout and fails if `git diff` is not empty.
-- The listing files and `objdumpAArch64` use Kraken's `Program`
-  (section 1.3.2).
+- The listing files and `objdumpAArch64` use a `List Instr`, as in ToySys,
+  for the first milestone, and Kraken's `Program` once a function with
+  local symbols is verified (sections 1.3.2 and 1.3.3).
 
 For later:
 
@@ -1726,9 +1779,10 @@ in "Scope at a glance".
 For the first milestone:
 
 1. Whether the beacon core of section 1.3.1 replaces Kraken's
-   `Executable` for these proofs, and whether `simp only` reduces
-   `Operation.interp` fast enough or Kraken's `kdeltaBetaOnly` simproc is
-   needed.
+   `Executable` for these proofs, with `Program` (section 1.3.2) or
+   `List Instr` (section 1.3.3, recommended for now), and whether
+   `simp only` reduces `Operation.interp` fast enough or Kraken's
+   `kdeltaBetaOnly` simproc is needed.
 2. Whether objdump's exact operand syntax parses for the three
    functions (`mov x0, #0x0  // #0` in `setjmp`, `cinc x0, x0, eq  // eq =
    none` in `longjmp`, tabs between mnemonic and operands). All their
