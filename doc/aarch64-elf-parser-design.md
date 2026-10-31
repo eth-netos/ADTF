@@ -109,6 +109,36 @@ in `.ro` as instructions: 10,504 lines instead of about 9,850, among them
 609 `udf` or `.inst` lines for words that are no valid instruction, and
 plausible-looking but wrong instructions for the strings.
 
+How often files lack them, checked with `aarch64-none-elf-strip` 14.3 on
+`bl31_main.o` (9 mapping symbols) and `bl31.elf` (472):
+
+| `strip` option              | `.o` keeps them | executable keeps them |
+|-----------------------------|-----------------|-----------------------|
+| `--strip-debug`, `-X`       | yes             | yes                   |
+| `--strip-unneeded`, `-x`    | yes             | no                    |
+| none (= `--strip-all`)      | no              | no                    |
+
+- Object files: the assembler always emits them, and nobody strips object
+  files fully, since that would remove the symbols the linker needs. So
+  for the main use case (reasoning about `.o` files) they are there.
+- Executables from a build directory (`bl31.elf`, U-Boot's `u-boot`,
+  Linux's `vmlinux`) are not stripped and have them.
+- Executables installed by a Linux distribution or a Yocto image are
+  usually stripped, and both `--strip-all` and `--strip-unneeded` remove
+  mapping symbols from executables; the debug symbols, if kept, go to a
+  separate debug file that contains the symbol table.
+- Firmware is usually not shipped as an ELF file at all: the build turns
+  `bl31.elf` into the flat binary `bl31.bin` (no headers, no symbols), and
+  that is what goes into the boot image. To reason about it, one takes the
+  `bl31.elf` of the same build and checks that its loaded contents equal
+  `bl31.bin`.
+
+So files without mapping symbols are common in deployment, but the files
+this project will parse (object files and unstripped build outputs) have
+them. For a stripped file, the parser can fall back to treating all
+executable sections as code and keeping undecodable words as `undecoded`,
+with the caveat that data may be decoded as instructions.
+
 ## 3. Lean datatype for an ELF file (first sketch)
 
 Two layers:
@@ -453,7 +483,8 @@ existing assembly parser:
    `R_AARCH64_ADD_ABS_LO12_NC` becomes `add x0, x0, :lo12:.rodata.psci_args.0`).
 3. Kraken's parser produces a `Program` per section, and the instructions
    that Kraken does not have yet (section 4.4) have to be added to its parser
-   as well as to `Operation`.
+   as well as to `Operation`. This is acceptable; as with `Operation`, they
+   get no semantics (executing them yields `Effects.unimplemented`).
 
 This gives a code layer without writing a decoder, and Kraken's parser
 already accepts objdump's aliases. The costs:
@@ -703,7 +734,9 @@ on the BL31 build directory.
   decodes executable sections into Kraken instructions.
 - Section contents stay bytes in the container layer; decoded instructions
   are a view computed from them (section 3.1).
-- Use the `$x`/`$d` mapping symbols to separate code from data.
+- Use the `$x`/`$d` mapping symbols to separate code from data. Files
+  without them (stripped executables) are not a target, but can be handled
+  by treating executable sections as code (section 2.1).
 - Express relocated operands with Kraken's `ConstExpr` (`label`, `pg_hi21`,
   `lo12`, `add`).
 - Words the decoder does not support are kept as `undecoded`, not rejected.
@@ -711,6 +744,8 @@ on the BL31 build directory.
   (section 4.3).
 - Instructions missing from Kraken are added to Kraken's `Operation` without
   semantics; executing them yields `Effects.unimplemented` (section 4.4).
+  Adding them to Kraken's assembly parser (and printer) is fine too, still
+  without semantics (section 4.5).
 - An ELF encoder is written too. A Kraken test checks the round trip on all
   object files and executables in a directory, recursively; Kraken's test
   suite runs it on a few committed object files, and during development it
