@@ -19,11 +19,13 @@ First milestone:
   sample specs. Proofs use instruction beacons that take objdump's text as
   a string (section 1.3).
 - Input: the objdump listings of these functions, committed verbatim inside
-  Lean files, turned into Kraken `Program`s by an elaborator; a script
-  regenerates the listings from the pinned BL31 build and diffs them
-  (section 4.7). No ELF parser (section 4.6).
-- Work in Kraken: the elaborator; the beacon tactic; spec helpers
-  (section 1.6).
+  Lean files, turned into lists of Kraken instructions (`List Instr`, as
+  in ToySys, section 1.3.2) by an elaborator; a script regenerates the
+  listings from the pinned BL31 build, and CI checks that `git diff` is
+  then empty (section 4.7). No ELF parser (section 4.6).
+- Work in Kraken: the elaborator; a minimal core for beacons, as in
+  ToySys, built on Kraken's `Operation.interp` instead of its `Executable`
+  (section 1.3.1); the beacon tactic; spec helpers (section 1.6).
 - Not needed: the instructions that Kraken lacks (none of the targets
   contains one, section 4.4), symbols outside the function (section 4.6),
   relocations, branch targets (section 4.8), loop rules.
@@ -131,7 +133,8 @@ these 3 have no branch at all, apart from the final `ret`:
 
 - `putchar` (1 instruction): `ret`; the C library's weak default, which
   returns its argument (`#pragma weak putchar`). A test of the whole path
-  from objdump to a theorem.
+  from objdump to a theorem. `bl31/multi_console.o` defines a strong
+  `putchar`, so `bl31.elf` contains that one, not this one (section 8).
 - `setjmp` (10) and `longjmp` (11), assembly (`lib/libc/aarch64/setjmp.S`,
   both in `libc/setjmp.o`): save and restore the callee-saved registers,
   `x30` and `sp`, with `stp` and `ldp`. `longjmp` does not return to its
@@ -332,8 +335,8 @@ function's symbol plus the offset that objdump prints, e.g.
 
 In ToySys, `i` is a Lean term (`.cmp .X0 (.reg .X1)`). In the first
 milestone, `i` is a string: the instruction as objdump prints it, parsed
-with Kraken's existing assembly parser, including objdump's branch-target
-form `14 <strlen+0x14>` (section 4.8). So a beacon can be pasted from the
+with Kraken's existing assembly parser (and later objdump's branch-target
+form `14 <strlen+0x14>`, section 4.8). So a beacon can be pasted from the
 committed objdump listing (section 4.7).
 
 Kraken has no such tactic. Its `kstep` steps through straight-line code
@@ -347,7 +350,7 @@ without naming the instructions. Porting `instr` means:
 - the special cases that ToySys has: conditional branches give two goals,
   calls continue with the callee's spec.
 
-#### 1.3.1 A minimal core for beacons (first milestone; proposal)
+#### 1.3.1 A minimal core for beacons (first milestone)
 
 Kraken's machine model around `Operation.interp` is more general than
 beacons need:
@@ -375,6 +378,129 @@ from Kraken only what describes one instruction:
 /-- The code in memory: the instruction at each address, if any. -/
 abbrev Code := Int64 → Option Instr
 
+/-- The instructions `instrs` are in `code` at `f`, 4 bytes apart. -/
+def Loaded (code : Code) (f : Int64) (instrs : List Instr) : Prop :=
+  f % 4 = 0 ∧ ∀ k i, instrs[k]? = some i →
+    code (f + 4 * .ofNat k) = some i
+
+/-- Fetches and runs the instruction at the program counter. Symbol
+addresses come from the `Labels` instance. -/
+def Code.step [Labels] (code : Code) (s : MachineState) : Effects :=
+  match code s.pc with
+  | some i => i.interp s.data ⟨s.pc, s.pc + 4⟩
+      (fun d => .done ⟨d, s.pc + 4⟩) (fun a d => .done ⟨d, a⟩)
+  | none => .unimplemented "no instruction at the program counter"
+
+def Code.stepWp [Labels] (code : Code) (s : MachineState)
+    (post : MachineState → Prop) : Prop :=
+  (code.step s).All post
+```
+
+The rest is ToySys's, translated: a fetch lemma (from `Loaded code f instrs` and
+`instrs[((a - f) / 4).toNat]? = some i`, proved by `rfl` for concrete `instrs`,
+`a` and `f`, conclude `code a = some i`), `step_of_fetch` and `wp_of_pc`, and
+the `instr` tactic, which parses its string with Kraken's parser, checks the
+address with `bv_decide` and the instruction with `rfl`, and unfolds
+`Instr.interp` and the declarations marked `@[kstep]`, splitting conditional
+branches into two goals. About 150 lines, judging by ToySys.
+
+Kept from Kraken: `Instr`, `Operation` and `Operation.interp` with all its
+helpers, `ConstExpr` and `evalBranchTarget`, `MachineState`, `Effects`
+and `Effects.All`, `Mem` and its separation logic, `Eventually`,
+`step_cps` and `eventually_trans`, and the parser. Not used: `Layout`,
+`Executable`, `Directives.interp`, `Executable.step` and `straightline`,
+`Executable.labels`, `kprologue`.
+
+This would not end up almost the same as Kraken's code. The new part is ToySys's
+model, not a copy of Kraken's: an address map instead of a list of sized
+directives, one instruction per step instead of straight-line runs, symbol
+addresses from a parameter instead of from the program's labels. What overlaps
+is `Code.step`, which is the one-directive case of `Directives.interp` (a few
+lines). In exchange:
+
+- The layout hypothesis of section 4.9 is `Loaded`, which states the
+  4-byte spacing directly, instead of a hypothesis about Kraken's
+  `Layout`.
+- Symbol addresses come from a `Labels` instance that the theorems take
+  as a parameter (ToySys's `Symbols`), so a symbol outside the function
+  gets a parameter as its address instead of -1 (section 4.6). The
+  first-milestone functions use no symbol; later, a branch target
+  `strlen+0x14` is `label "strlen" + 0x14`, and the theorem assumes
+  `label "strlen" = strlen` (section 1.3.3).
+- Proofs about several functions compose as in ToySys's `swap_swap_ok`:
+  one `Loaded` hypothesis per function about the same `code`
+  (section 1.4). Kraken's `NOTES.md` names composition as the weak point
+  of its layout-based model.
+- A listing is a `List Instr` in the first milestone (section 1.3.2) and
+  a Kraken `Program` later (section 1.3.3).
+
+What is lost: theorems are about `Code.step`, not about Kraken's
+`Executable.step`, so Kraken's existing tools that work on `Executable`
+(`kprologue`, `kstep`'s straight-line unrolling, `Executable.eval` for testing)
+do not apply. If needed, a lemma relating the two can be proved later: for the
+program `instrs.map .instr` with the function's label in front and
+`Program.fakeLayout`-style sizes, `Executable.step` at an instruction's address
+does what `Code.step` does. And whether `simp only` with the `@[kstep]`
+declarations reduces `Operation.interp` fast enough is open; Kraken's
+`kdeltaBetaOnly` simproc exists for this and could be reused, since only its
+`Directives.interp` case is tied to straight-line code.
+
+#### 1.3.2 A list of instructions, as in ToySys (first milestone)
+
+In the first milestone, the listings stay as close as possible to ToySys:
+`objdumpAArch64` returns a `List Instr` (ToySys's `code`), after checking
+and dropping the function's label, and `Loaded` (section 1.3.1), the fetch
+lemma, `step_of_fetch`, `wp_of_pc` and `instr` are ToySys's, with ToySys's
+`Instr`, `State` and `Effects` replaced by Kraken's. The only differences
+left are the ones Kraken's semantics forces: the program counter is an
+`Int64`, not a `BitVec 64`, and the effects of an instruction are Kraken's
+`Effects` with `Effects.All` instead of ToySys's `Effects.wp` on a
+platform. Section 1.3.3 has them too.
+
+Why:
+
+- `Loaded` and the fetch lemma are ToySys's; the proof for `BitVec 64`
+  should carry over to `Int64`. The address arithmetic is `(a - f) / 4`,
+  with no sum of directive sizes.
+- Proofs and specs read like ToySys's (`Loaded prog (syms "max3")
+  max3_code` there, `Loaded code longjmp longjmp_o` here).
+- Less to explain and to trust: no `Program.offset`, no `Program.instrAt`,
+  no statement about labels.
+- For the first milestone (one label per function, at its start, no data,
+  no branches) nothing is lost.
+
+What it costs later:
+
+- Assembly functions can have local symbols inside them, e.g.
+  `flush_dcache_range` in `bl31/cache_helpers.o` has `<loop_civac>:` at
+  0x20 and `<exit_loop_civac>:` at 0x34, and objdump prints its branches as
+  `b.cc 20 <loop_civac>`. A `List Instr` has no place for them. The
+  elaborator could rewrite such a target to `flush_dcache_range + 0x20`
+  (it sees the label's offset in the listing), but then a beacon copied
+  from the listing contains `<loop_civac>`, and the beacon tactic would
+  have to do the same rewriting from the number `20` and the function
+  symbol of its `at` address. With `Program` (section 1.3.3), `Loaded`
+  relates `loop_civac` to the symbol map and nothing needs rewriting.
+- Data in code (`.word` in assembly, `byteArray`) cannot be represented;
+  such functions are rejected (none so far).
+- Running a listing with Kraken's `Program.fakeLayout` and
+  `Executable.eval`, or relating `Code.step` to `Executable.step`, needs
+  `instrs.map .instr` first. A one-liner, but a conversion.
+- Moving to `Program` changes the type of every `*_o` definition and
+  `Loaded`; the proofs themselves should not change, since the `instr`
+  tactic hides the fetch.
+
+Kraken's `Program` (section 1.3.3) takes over when the first function with
+local symbols or data in code is verified.
+
+#### 1.3.3 Later: Kraken's `Program` in the beacon core
+
+Once a function with local symbols is verified (section 1.3.2), the
+listing files and `objdumpAArch64` switch to Kraken's type
+`Program := List Directive`, as Kraken's parser produces it, and `Loaded`
+reads it:
+
+```lean
 /-- The byte offset of directive `k` of `prog` in an object file: the
 sizes of the directives before it (`Directive.fakeSize`: 4 per
 instruction, 0 per label). -/
@@ -396,145 +522,29 @@ def Loaded (syms : Label → Int64) (code : Code) (f : Int64)
     | .instr i => code (f + .ofNat (prog.offset k)) = some i
     | .label l => syms l = f + .ofNat (prog.offset k)
     | .byteArray _ => True
-
-/-- Fetches and runs the instruction at the program counter. Symbol
-addresses come from the `Labels` instance. -/
-def Code.step [Labels] (code : Code) (s : MachineState) : Effects :=
-  match code s.pc with
-  | some i => i.interp s.data ⟨s.pc, s.pc + 4⟩
-      (fun d => .done ⟨d, s.pc + 4⟩) (fun a d => .done ⟨d, a⟩)
-  | none => .unimplemented "no instruction at the program counter"
-
-def Code.stepWp [Labels] (code : Code) (s : MachineState)
-    (post : MachineState → Prop) : Prop :=
-  (code.step s).All post
 ```
-
-The rest is ToySys's, translated: a fetch lemma (from `Loaded syms code f prog`
-and `prog.instrAt n = some i`, proved by `rfl` for a concrete `prog`, conclude
-`code (f + n) = some i`), `step_of_fetch` and `wp_of_pc`, and the `instr`
-tactic, which parses its string with Kraken's parser, checks the address with
-`bv_decide` and the instruction with `rfl`, and unfolds `Instr.interp` and the
-declarations marked `@[kstep]`, splitting conditional branches into two goals.
-About 150 lines, judging by ToySys.
-
-Kept from Kraken: `Instr`, `Operation` and `Operation.interp` with all its
-helpers, `ConstExpr` and `evalBranchTarget`, `MachineState`, `Effects`
-and `Effects.All`, `Mem` and its separation logic, `Eventually`,
-`step_cps` and `eventually_trans`, and the parser. Not used: `Layout`,
-`Executable`, `Directives.interp`, `Executable.step` and `straightline`,
-`Executable.labels`, `kprologue`.
-
-This would not end up almost the same as Kraken's code. The new part is ToySys's
-model, not a copy of Kraken's: an address map instead of a list of sized
-directives, one instruction per step instead of straight-line runs, labels as
-facts about a symbol map instead of a source of addresses. What overlaps is
-`Code.step`, which is the one-directive case of `Directives.interp` (a few
-lines). In exchange:
-
-- The layout hypothesis of section 4.9 becomes `Loaded`, which states the
-  4-byte spacing directly; `ObjLayout` (section 1.6) is not needed.
-- Symbol addresses come from a `Labels` instance built from a symbol map
-  (ToySys's `Symbols`), so a symbol outside the function gets a parameter
-  as its address instead of -1 (section 4.6), and a branch target
-  `strlen+0x14` is `syms "strlen" + 0x14` with
-  `Loaded syms code (syms "strlen") strlen_o`.
-- Proofs about several functions compose as in ToySys's `swap_swap_ok`:
-  one `Loaded` hypothesis per function about the same `code`
-  (section 1.4). Kraken's `NOTES.md` names composition as the weak point
-  of its layout-based model.
-- The program stays Kraken's `Program` (section 1.3.2).
-
-What is lost: theorems are about `Code.step`, not about Kraken's
-`Executable.step`, so Kraken's existing tools that work on `Executable`
-(`kprologue`, `kstep`'s straight-line unrolling, `Executable.eval` for
-testing) do not apply. If needed, a lemma relating the two can be proved
-later: for a program whose only label is at the start and with
-`Program.fakeLayout`-style sizes, `Executable.step` at an instruction's
-address does what `Code.step` does. And whether `simp only` with the
-`@[kstep]` declarations reduces `Operation.interp` fast enough is open;
-Kraken's `kdeltaBetaOnly` simproc exists for this and could be reused,
-since only its `Directives.interp` case is tied to straight-line code.
-
-#### 1.3.2 Kraken's `Program` in the beacon core
-
-The listing files and `objdumpAArch64` keep Kraken's type
-`Program := List Directive`, as Kraken's parser produces it; the core of
-section 1.3.1 reads it through `Loaded`:
 
 - Instructions are at `f` plus `Program.offset`, which uses Kraken's
   `Directive.fakeSize`, so labels take no room, exactly as in the object
   file (section 4.9). The fetch lemma goes through `Program.instrAt`, the
-  counterpart of ToySys's `code[(a - f) / 4]?`; for a program without
-  labels after the start both are the same.
+  counterpart of `instrs[(a - f) / 4]?`; for a program without labels
+  after the start both are the same.
 - Labels are not a source of addresses, as in `Executable.labels`, but
   facts about the symbol map: `Loaded` says that each label of the program
   is at its address in `syms`. The `Labels` instance for `Code.step` is
-  `syms`, so the function's own symbol (`longjmp`), branch targets
-  (`strlen+0x14`, later) and symbols outside the function (later) are all
+  `syms`, so the function's own symbol, branch targets (`strlen+0x14`),
+  local symbols (`loop_civac`) and symbols outside the function are all
   resolved the same way, and for the program's own labels consistently
   with where the code is.
-- Data in code (`byteArray`, none in the targets) is skipped by `Loaded`
-  but counted by `Program.offset`, so execution that reaches it gets
-  stuck in the proof, as in Kraken.
+- Data in code (`byteArray`) is skipped by `Loaded` but counted by
+  `Program.offset`, so execution that reaches it gets stuck in the proof,
+  as in Kraken.
 
-So nothing has to convert between a `Program` and a list of instructions,
-the same value can still be run with Kraken's `Program.fakeLayout` and
-`Executable.eval` for testing, and a lemma relating `Code.step` to
-`Executable.step` (if ever needed) is about the same `Program`. The cost is
+Then nothing has to convert between a `Program` and a list of
+instructions, and the same value can be run with Kraken's
+`Program.fakeLayout` and `Executable.eval` for testing. The cost is
 `Program.offset` and `Program.instrAt` instead of plain list indexing, a
-few lines and a slightly bigger fetch lemma. Section 1.3.3 compares this
-with a plain list of instructions.
-
-#### 1.3.3 Alternative: a list of instructions, as in ToySys
-
-Staying as close as possible to ToySys means: `objdumpAArch64` returns a
-`List Instr` (ToySys's `code`), checking and dropping the function's label,
-and `Loaded`, the fetch lemma (`code[((a - f) / 4).toNat]? = some i`),
-`step_of_fetch`, `wp_of_pc` and `instr` are ToySys's, with ToySys's
-`Instr`, `State` and `Effects` replaced by Kraken's. The only differences
-left are the ones Kraken's semantics forces: the program counter is an
-`Int64`, not a `BitVec 64`, and the effects of an instruction are Kraken's
-`Effects` with `Effects.All` instead of ToySys's `Effects.wp` on a
-platform. These are the same for section 1.3.2.
-
-For it:
-
-- `Loaded` and the fetch lemma are ToySys's; the proof for `BitVec 64`
-  should carry over to `Int64`. The address arithmetic is `(a - f) / 4`,
-  with no sum of directive sizes.
-- Proofs and specs read like ToySys's (`Loaded prog (syms "max3")
-  max3_code` there, `Loaded code (syms "longjmp") longjmp_o` here).
-- Less to explain and to trust: no `Program.offset`, no `Program.instrAt`,
-  no statement about labels.
-- For the first milestone (one label per function, at its start, no data)
-  nothing is lost.
-
-Against it:
-
-- Assembly functions can have local symbols inside them, e.g.
-  `flush_dcache_range` in `bl31/cache_helpers.o` has `<loop_civac>:` at
-  0x20 and `<exit_loop_civac>:` at 0x34, and objdump prints its branches as
-  `b.cc 20 <loop_civac>`. A `List Instr` has no place for them. The
-  elaborator can still rewrite such a target to `flush_dcache_range +
-  0x20` (it sees the label's offset in the listing), but then a beacon
-  copied from the listing contains `<loop_civac>`, and the beacon tactic
-  has to do the same rewriting from the number `20` and the function
-  symbol of its `at` address. With `Program`, `Loaded` relates
-  `loop_civac` to `syms` and nothing needs rewriting.
-- Data in code (`.word` in assembly, `byteArray`) cannot be represented;
-  such functions would be rejected (none so far).
-- Running a listing with Kraken's `Program.fakeLayout` and
-  `Executable.eval`, or relating `Code.step` to `Executable.step`, needs
-  `instrs.map .instr` first. A one-liner, but a conversion.
-- Moving to `Program` later changes the type of every `*_o` definition and
-  `Loaded`; the proofs themselves should not change, since the `instr`
-  tactic hides the fetch.
-
-Recommendation: `List Instr` for the first milestone, since its three
-functions have no internal labels, no data and no branches, and ToySys's
-proofs can be reused unchanged. Switch to `Program` (section 1.3.2) when
-the first assembly function with local symbols is verified.
+few lines and a slightly bigger fetch lemma.
 
 ### 1.4 Composability under linking (later)
 
@@ -562,10 +572,12 @@ What a proof about one object file can assume, so that proofs compose:
 Needed for the first milestone, and not in Kraken yet:
 
 - The path from objdump's output into Lean (section 4.7): committed
-  objdump listings, read by an elaborator that turns them into a Kraken
-  `Program`, and a script that regenerates and diffs them.
-- The layout hypothesis (section 4.9) and the spec conventions of
-  section 1.6 (`Returns`, callee-saved registers, a buffer predicate).
+  objdump listings, read by an elaborator that turns them into a
+  `List Instr`, a script that regenerates them, and a CI check.
+- The beacon core (`Code`, `Loaded`, `Code.step`, section 1.3.1), which
+  also states the layout hypothesis (section 4.9), and the spec
+  conventions of section 1.6 (`Returns`, callee-saved registers, a buffer
+  predicate).
 - Instruction beacons taking a string (section 1.3).
 
 Needed for the first milestone, and already in Kraken (`main` at
@@ -574,19 +586,21 @@ Needed for the first milestone, and already in Kraken (`main` at
 - The assembly parser, accepting objdump's aliases (`mov`, `cmp`, `lsl`,
   `cset`, `tst`, `ubfx`, ...), and `parseAArch64("...")` to write programs
   in Lean files, and `parseFileAArch64("path")`, which reads and parses a
-  file at elaboration time. All mnemonics that the first-milestone
-  functions use occur in the parser's source (`cinc`, `ccmn`, `umulh`,
-  `ldurb`, ...), but whether objdump's exact operand syntax parses is only
-  known once the listings are fed to it.
+  file at elaboration time. It parses all 22 instructions of the three
+  first-milestone listings as objdump prints them, with the offset and
+  instruction word columns dropped and the tabs and `//` comments kept
+  (checked with `parseAArch64` at Kraken `c9aa45e`): e.g. `mov x7, sp`
+  becomes `ADD_e x7, sp, #0`, `mov x0, #0x0  // #0` becomes `MOVZ`, and
+  `ldp x7, xzr, [x0, #96]` loads into `XZR`.
 - `ConstExpr` with `label`, `add`, `pg_hi21` and `lo12`, and the `Labels`
   class for symbol addresses, which is what relocations need (later; the
   first-milestone functions have no relocations, section 4.6).
-- `Directive.fakeSize` (4 bytes per instruction, 0 per label), which is
-  exactly the layout hypothesis of section 4.9.
 - `Effects.unimplemented`, whose weakest precondition is `False`.
-- Symbolic execution (`kstep`, `kprologue`), separation logic for memory
-  (`=⋆`, `ecancel`, `load_sep`, `store_sep`), and `Eventually` with
-  `eventually_trans` and a loop rule (`reg_dec_loop`).
+- `Instr`, `Operation.interp` and the `@[kstep]` declarations that
+  unfold it, `MachineState`, `Effects` and `Effects.All`, separation logic
+  for memory (`=⋆`, `ecancel`, `load_sep`, `store_sep`), and `Eventually`
+  with `eventually_trans`. Not used: `Executable`, `kprologue` and
+  `kstep`'s straight-line unrolling (section 1.3.1).
 - Kraken's README says it verifies code "disassembled from compiler output
   (`.o` files)", but `main` contains no tool for that; the path of
   section 4.7 is new.
@@ -644,23 +658,25 @@ Removed:
 
 ### 1.6 Sample specs (first milestone)
 
-Sketches, not yet checked by Lean. They use Kraken's vocabulary (`Layout`,
-`straightlineStep`, `Eventually`, `MachineData` with `regs.X0` ...
-`regs.SP` as `UInt64`, `dmem` with `=⋆` and `List.At`) and a few helpers
-that are new. Each `*_o` program comes from the committed objdump listing
-(section 4.7). With the beacon core of section 1.3.1, `ObjLayout` becomes
-`Loaded syms code (syms "strlen") strlen_o`, and `Returns` uses
-`Code.stepWp` instead of `straightlineStep`; the specs stay the same
-otherwise.
+Sketches, not yet checked by Lean. They use the beacon core of
+section 1.3.1 (`Code`, `Loaded`, `Code.stepWp`), Kraken's vocabulary
+(`Eventually`, `MachineData` with `regs.X0` ... `regs.SP` as `UInt64`,
+`dmem` with `=⋆` and `List.At`) and a few helpers that are new. Each `*_o`
+list of instructions comes from the committed objdump listing
+(section 4.7). Each theorem takes the code in memory, the function's
+address as a parameter named after the function (so that a beacon can say
+`at longjmp + 0x1c`), and `Loaded` as a hypothesis (section 4.9).
 
 The first milestone needs the specs of `putchar`, `setjmp` and `longjmp`,
-and of the helpers `ObjLayout`, `CalleeSaved`, `Returns` and `Bytes`. The
-others (`strlen` to `strtoul`, and `CString`) are for the functions with
-loops, later; `strlen_o` shows what a listing with branches looks like.
+and of the helpers `CalleeSaved`, `Returns` and `Bytes`. The others
+(`strlen` to `strtoul`, and `CString`) are for the functions with loops,
+later; `strlen_o` shows what a listing with branches looks like. Its
+branch targets are `label "strlen" + 0x14` (section 4.8), so its theorem
+will also assume `label "strlen" = strlen`.
 
 ```lean
 /-- The code of `strlen` in `libc/strlen.o`, from the committed listing. -/
-def strlen_o : Program := objdumpAArch64("
+def strlen_o : List Instr := objdumpAArch64("
 0000000000000000 <strlen>:
    0:	aa0003e1 	mov	x1, x0
    4:	39400022 	ldrb	w2, [x1]
@@ -671,28 +687,21 @@ def strlen_o : Program := objdumpAArch64("
   18:	17fffffb 	b	4 <strlen+0x4>
 ")
 
-/-- The layout of an object file's code (section 4.9): each instruction
-takes 4 bytes, each label 0 bytes, and the code starts at a 4-byte-aligned
-address. -/
-def ObjLayout (prog : Program) (layout : Layout) : Prop :=
-  (∀ i (h : i < prog.length), layout.size i = prog[i].fakeSize) ∧
-  layout.start % 4 = 0
-
 /-- The registers that a function must preserve (AAPCS64): `x19` to `x29`
 and `sp`. -/
 def CalleeSaved (s₀ s : MachineData) : Prop :=
   s.regs.X19 = s₀.regs.X19 ∧ s.regs.X20 = s₀.regs.X20 ∧ ... ∧
   s.regs.X29 = s₀.regs.X29 ∧ s.regs.SP = s₀.regs.SP
 
-/-- Run from the start of `prog` in state `s₀`, the function eventually
-returns to the address in `x30`, with the callee-saved registers
-preserved, in a state that satisfies `post`. -/
-def Returns [layout : Layout] (prog : Program) (s₀ : MachineData)
+/-- Run from `f` in state `s₀`, the code eventually returns to the
+address in `x30`, with the callee-saved registers preserved, in a state
+that satisfies `post`. -/
+def Returns [Labels] (code : Code) (f : Int64) (s₀ : MachineData)
     (post : MachineData → Prop) : Prop :=
-  Eventually (straightlineStep (layout prog))
+  Eventually code.stepWp
     (fun s => s.pc = s₀.regs.X30.toInt64 ∧ CalleeSaved s₀ s.data ∧
       post s.data)
-    ⟨s₀, layout.start⟩
+    ⟨s₀, f⟩
 
 /-- The bytes `bs` at address `a`, without wrapping around the end of the
 address space. -/
@@ -707,19 +716,21 @@ def CString (bs : List UInt8) (a : UInt64) : DataMem → Prop :=
 `putchar` returns its argument and changes nothing else:
 
 ```lean
-theorem putchar_spec [layout : Layout] (h : ObjLayout putchar_o layout)
+theorem putchar_spec [Labels] (code : Code) (putchar : Int64)
+    (h : Loaded code putchar putchar_o)
     (s₀ : MachineData) :
-    Returns putchar_o s₀ (fun s =>
+    Returns code putchar s₀ (fun s =>
       s.regs.X0 = s₀.regs.X0 ∧ s.dmem = s₀.dmem)
 ```
 
 `strlen` returns the length and does not write memory:
 
 ```lean
-theorem strlen_spec [layout : Layout] (h : ObjLayout strlen_o layout)
+theorem strlen_spec [Labels] (code : Code) (strlen : Int64)
+    (h : Loaded code strlen strlen_o)
     (s₀ : MachineData) (bs : List UInt8) (R : DataMem → Prop)
     (h_mem : s₀.dmem =⋆ CString bs s₀.regs.X0 ⋆ R) :
-    Returns strlen_o s₀ (fun s =>
+    Returns code strlen s₀ (fun s =>
       s.regs.X0.toNat = bs.length ∧ s.dmem = s₀.dmem)
 ```
 
@@ -727,12 +738,13 @@ theorem strlen_spec [layout : Layout] (h : ObjLayout strlen_o layout)
 conjunction makes them disjoint, as C requires) and returns `dst`:
 
 ```lean
-theorem memcpy_spec [layout : Layout] (h : ObjLayout memcpy_o layout)
+theorem memcpy_spec [Labels] (code : Code) (memcpy : Int64)
+    (h : Loaded code memcpy memcpy_o)
     (s₀ : MachineData) (src old : List UInt8) (R : DataMem → Prop)
     (h_n : s₀.regs.X2.toNat = src.length)
     (h_old : old.length = src.length)
     (h_mem : s₀.dmem =⋆ Bytes old s₀.regs.X0 ⋆ Bytes src s₀.regs.X1 ⋆ R) :
-    Returns memcpy_o s₀ (fun s =>
+    Returns code memcpy s₀ (fun s =>
       s.regs.X0 = s₀.regs.X0 ∧
       s.dmem =⋆ Bytes src s₀.regs.X0 ⋆ Bytes src s₀.regs.X1 ⋆ R)
 ```
@@ -747,11 +759,12 @@ def memcmpRef : List UInt8 → List UInt8 → Int
     if a = b then memcmpRef as bs else a.toNat - b.toNat
   | _, _ => 0
 
-theorem memcmp_spec [layout : Layout] (h : ObjLayout memcmp_o layout)
+theorem memcmp_spec [Labels] (code : Code) (memcmp : Int64)
+    (h : Loaded code memcmp memcmp_o)
     (s₀ : MachineData) (as bs : List UInt8) (R : DataMem → Prop)
     (h_len : as.length = bs.length) (h_n : s₀.regs.X2.toNat = as.length)
     (h_mem : s₀.dmem =⋆ Bytes as s₀.regs.X0 ⋆ Bytes bs s₀.regs.X1 ⋆ R) :
-    Returns memcmp_o s₀ (fun s =>
+    Returns code memcmp s₀ (fun s =>
       (s.regs.X0.toBitVec.setWidth 32).toInt = memcmpRef as bs ∧
       s.dmem = s₀.dmem)
 ```
@@ -762,11 +775,12 @@ excludes; a second spec with both buffers inside one region covers that.
 `memset` fills `n` bytes with the low byte of `c` and returns `dst`:
 
 ```lean
-theorem memset_spec [layout : Layout] (h : ObjLayout memset_o layout)
+theorem memset_spec [Labels] (code : Code) (memset : Int64)
+    (h : Loaded code memset memset_o)
     (s₀ : MachineData) (old : List UInt8) (R : DataMem → Prop)
     (h_n : s₀.regs.X2.toNat = old.length)
     (h_mem : s₀.dmem =⋆ Bytes old s₀.regs.X0 ⋆ R) :
-    Returns memset_o s₀ (fun s =>
+    Returns code memset s₀ (fun s =>
       s.regs.X0 = s₀.regs.X0 ∧
       s.dmem =⋆ Bytes (List.replicate old.length s₀.regs.X1.toUInt8)
         s₀.regs.X0 ⋆ R)
@@ -783,12 +797,13 @@ the digits (or `nptr` if there were none) is stored there:
 and the number of bytes it consumes (0 if it finds no digits). -/
 def strtoulRef (bs : List UInt8) (base : Nat) : UInt64 × Nat := ...
 
-theorem strtoul_spec [layout : Layout] (h : ObjLayout strtoul_o layout)
+theorem strtoul_spec [Labels] (code : Code) (strtoul : Int64)
+    (h : Loaded code strtoul strtoul_o)
     (s₀ : MachineData) (bs old : List UInt8) (R : DataMem → Prop)
     (h_base : let b := s₀.regs.X2.toUInt32.toNat; b = 0 ∨ 2 ≤ b ∧ b ≤ 36)
     (h_old : old.length = 8)
     (h_mem : s₀.dmem =⋆ CString bs s₀.regs.X0 ⋆ Bytes old s₀.regs.X1 ⋆ R) :
-    Returns strtoul_o s₀ (fun s =>
+    Returns code strtoul s₀ (fun s =>
       let (v, n) := strtoulRef bs s₀.regs.X2.toUInt32.toNat
       s.regs.X0 = v ∧
       s.dmem =⋆ CString bs s₀.regs.X0 ⋆
@@ -808,22 +823,24 @@ def jmpBuf (s : MachineData) : List UInt8 :=
   ([s.regs.X19, s.regs.X20, ..., s.regs.X30, s.regs.SP, 0].map
     UInt64.toBytes).flatten
 
-theorem setjmp_spec [layout : Layout] (h : ObjLayout setjmp_o layout)
+theorem setjmp_spec [Labels] (code : Code) (setjmp : Int64)
+    (h : Loaded code setjmp setjmp_o)
     (s₀ : MachineData) (old : List UInt8) (R : DataMem → Prop)
     (h_old : old.length = 112)
     (h_mem : s₀.dmem =⋆ Bytes old s₀.regs.X0 ⋆ R) :
-    Returns setjmp_o s₀ (fun s =>
+    Returns code setjmp s₀ (fun s =>
       s.regs.X0 = 0 ∧ s.dmem =⋆ Bytes (jmpBuf s₀) s₀.regs.X0 ⋆ R)
 
-theorem longjmp_spec [layout : Layout] (h : ObjLayout longjmp_o layout)
+theorem longjmp_spec [Labels] (code : Code) (longjmp : Int64)
+    (h : Loaded code longjmp longjmp_o)
     (s₀ saved : MachineData) (R : DataMem → Prop)
     (h_mem : s₀.dmem =⋆ Bytes (jmpBuf saved) s₀.regs.X0 ⋆ R) :
-    Eventually (straightlineStep (layout longjmp_o))
+    Eventually code.stepWp
       (fun s => s.pc = saved.regs.X30.toInt64 ∧
         CalleeSaved saved s.data ∧
         s.data.regs.X0 = (if s₀.regs.X1 = 0 then 1 else s₀.regs.X1) ∧
         s.data.dmem = s₀.dmem)
-      ⟨s₀, layout.start⟩
+      ⟨s₀, longjmp⟩
 ```
 
 `longjmp` tests all 64 bits of `x1` (`ands x0, x1, x1; cinc x0, x0, eq`),
@@ -1363,9 +1380,10 @@ parser. For the C library functions of section 1.2.1:
   branches inside a section need no relocation. `-r` prints nothing for
   them.
 
-So the only label in a first-milestone `Program` is the function's own
-symbol; the first-milestone functions have no branches, and the branch
-targets of the later ones are relative to that symbol (section 4.8).
+So the only label in a first-milestone listing is the function's own
+symbol, which the elaborator checks and drops (section 1.3.2); the
+first-milestone functions have no branches, and the branch targets of the
+later ones are relative to that symbol (section 4.8).
 
 Symbols outside the function (later). Kraken's `Executable.step` and
 `Executable.straightline` use `Executable.labels`, which gives each label
@@ -1401,7 +1419,7 @@ What neither the first milestone nor these later targets need:
   name their targets. Picking the targets used `readelf -s` once, which is
   not part of any proof.
 
-### 4.7 From objdump's output to a Lean `Program` (first milestone)
+### 4.7 From objdump's output to Lean (first milestone)
 
 Options:
 
@@ -1425,7 +1443,7 @@ Options:
    be confirmed for the Lean version used), so a changed listing need not
    trigger a rebuild of the proofs.
 3. The listing verbatim inside a Lean file:
-   `def strlen_o : Program := objdumpAArch64("<listing>")` (as in
+   `def strlen_o : List Instr := objdumpAArch64("<listing>")` (as in
    section 1.6), with an elaborator that converts and parses the string
    literal at elaboration time. The conversion is Lean code (as in 2), Lake
    tracks the file (as in 1), the committed text is objdump's own (so a
@@ -1444,11 +1462,12 @@ Decision: option 3.
   elsewhere (section 4.10).
 - The elaborator `objdumpAArch64` skips objdump's header lines, checks the
   `<strlen>:` line and that the offsets start at 0 and grow by 4, drops
-  the offset and instruction word columns, turns `<strlen>:` into the
-  label `strlen:`, and passes the rest to Kraken's parser, which skips
-  objdump's `//` comments (and later reads its branch targets,
-  section 4.8). It rejects everything else: relocation lines, data lines
-  (`.word`), further symbols.
+  the `<strlen>:` line and the offset and instruction word columns, passes
+  the rest to Kraken's parser, which skips objdump's `//` comments (and
+  later reads its branch targets, section 4.8), and returns the
+  instructions of the parsed `Program` as a `List Instr` (section 1.3.2).
+  It rejects everything else: relocation lines, data lines (`.word`),
+  further symbols.
 - A script in ADTF (it needs the imx-atf build, section 4.7.2) overwrites these
   files with fresh output from the object files of the pinned build. `git diff`
   shows what changed; CI runs the script on a clean checkout and fails if `git
@@ -1479,7 +1498,7 @@ namespace ADTF.AtfLibc.Listing
 
 /-- `aarch64-none-elf-objdump -d -r --disassemble=longjmp libc/setjmp.o`,
 run in `imx-atf/build/imx93/release`. -/
-def longjmp_o : Program := objdumpAArch64(r#"
+def longjmp_o : List Instr := objdumpAArch64(r#"
 
 libc/setjmp.o:     file format elf64-littleaarch64
 
@@ -1518,8 +1537,8 @@ end ADTF.AtfLibc.Listing
 - `--disassemble=sym` takes one symbol (with several, objdump uses only
   the last), so one file per function also means one objdump run per
   file.
-- The type is Kraken's `Program` (section 1.3.2), or `List Instr` with
-  the alternative of section 1.3.3.
+- The type is `List Instr` (section 1.3.2); later Kraken's `Program`
+  (section 1.3.3).
 
 #### 4.7.2 The script
 
@@ -1543,7 +1562,8 @@ committed files either; that is `git diff`'s job. What it does:
    defines it as a function symbol (`readelf -sW` on all object files,
    read once). Exactly one must; otherwise the script fails and names the
    candidates (static functions can have the same name in several object
-   files; section 8).
+   files, and `putchar` is defined in `libc/putchar.o` and
+   `bl31/multi_console.o`; section 8).
 5. Runs objdump, checks that the output contains the line
    `0000000000000000 <sym>:` exactly once (for an unknown symbol objdump
    prints only the headers and still exits with 0) and does not contain
@@ -1597,22 +1617,22 @@ apart from the dropped columns, and a beacon's string is objdump's text.
 
 ### 4.9 The layout hypothesis (first milestone)
 
-A theorem about an object file holds for every address the linker may
-choose, so it quantifies over the `Layout`. Kraken's `Layout` lets every
-directive have an arbitrary size, so branch targets like `strlen+0x14` and
-beacon addresses are only right with a hypothesis that the layout is the
-object file's: each instruction takes 4 bytes, each label 0 bytes, and the
-code starts at a multiple of 4 (`ObjLayout` in section 1.6; `Loaded` with
-the beacon core of section 1.3.1).
+A theorem about an object file holds for every address the linker may choose, so
+it quantifies over the function's address. Branch targets like `strlen+0x14` and
+beacon addresses are only right with a hypothesis that the code is laid out as
+in the object file: each instruction takes 4 bytes, each label 0 bytes, and the
+code starts at a multiple of 4. That hypothesis is `Loaded` (section 1.3.1).
+(Kraken's `Layout` lets every directive have an arbitrary size, so a theorem
+about Kraken's `Executable` would need the same hypothesis about its `Layout`.)
 
 This holds for AArch64. Every A64 instruction is 4 bytes; AArch64 has no
-variable-length or compressed encodings (unlike T32 in AArch32, or
-x86-64). Labels occupy no bytes, and data in code sections (`byteArray`,
-none in the first-milestone functions) takes its length. Kraken already has
-this function: `Directive.fakeSize`, used by `Program.fakeLayout` for
-testing. Each function's section has alignment 4 (`.text.strlen` in
-`readelf -S`), so the linker places it at a multiple of 4, which the
-architecture requires anyway for instruction addresses.
+variable-length or compressed encodings (unlike T32 in AArch32, or x86-64).
+Labels occupy no bytes, and data in code sections (`byteArray`, none in the
+first-milestone functions) takes its length. Kraken already has this
+function for its `Program`s: `Directive.fakeSize`, used by
+`Program.fakeLayout` for testing. Each function's section has alignment 4
+(`.text.strlen` in `readelf -S`), so the linker places it at a multiple of
+4, which the architecture requires anyway for instruction addresses.
 
 ### 4.10 Where things live and what is pinned (first milestone)
 
@@ -1702,14 +1722,17 @@ For the first milestone:
 - Proofs use instruction beacons, `instr "<objdump text>" at sym + off`,
   whose string is parsed by Kraken's assembly parser (section 1.3).
 - The objdump listings of the verified functions are committed verbatim
-  inside Lean files and elaborated into Kraken `Program`s; a script
-  regenerates and diffs them (section 4.7). No ELF parser and no Lean
+  inside Lean files and elaborated into lists of Kraken instructions; a
+  script regenerates them (section 4.7). No ELF parser and no Lean
   decoder in the first milestone (section 4.6).
 - The listing files hold objdump's output verbatim in raw string
   literals; the script is Python with the standard library only, and does
   not parse objdump's output (sections 4.7.1 and 4.7.2).
-- Each theorem assumes the object file's layout: 4-byte instructions,
-  0-byte labels, 4-byte-aligned start (section 4.9).
+- Proofs use a minimal core for beacons in the style of ToySys (`Code`,
+  `Loaded`, `Code.step`), built on Kraken's `Operation.interp`, not
+  Kraken's `Executable` (section 1.3.1).
+- Each theorem assumes the object file's layout, with `Loaded`: 4-byte
+  instructions, 4-byte-aligned start (section 4.9).
 - No encoders and no round trips (section 5).
 - Kraken changes go on the branch `aarch64-atf` of the `kraken` submodule,
   the beacons in separate files there; the listings, specs and proofs go
@@ -1717,14 +1740,15 @@ For the first milestone:
 - imx-atf is pinned by its submodule commit, the toolchain by a committed
   version file that the scripts check (section 4.10). CI runs the listing
   script on a clean checkout and fails if `git diff` is not empty.
-- The listing files and `objdumpAArch64` use a `List Instr`, as in ToySys,
-  for the first milestone, and Kraken's `Program` once a function with
-  local symbols is verified (sections 1.3.2 and 1.3.3).
+- The listing files and `objdumpAArch64` use a `List Instr`, as in ToySys
+  (section 1.3.2).
 
 For later:
 
 - Kraken's parser accepts objdump's branch-target form `14 <strlen+0x14>`
   as `.add (.label "strlen") (.int64 0x14)` (section 4.8).
+- Listings become Kraken `Program`s once a function with local symbols or
+  data in code is verified (section 1.3.3).
 - The C library's functions with loops (section 1.2.1), then other
   platform-independent functions without calls (section 1.2.2), then
   calls (section 1.2.3); the TRDC functions come after that, once a TRDC
@@ -1760,8 +1784,7 @@ First milestone:
    4.10), for `putchar`, `setjmp` and `longjmp`.
 2. Write the beacon core and the `instr _ at _` tactic, taking a string,
    in separate files in Kraken (sections 1.3.1 and 4.10).
-3. Define `Returns`, `CalleeSaved` and `Bytes` (section 1.6), with
-   `Loaded` instead of `ObjLayout` if section 1.3.1 is adopted.
+3. Define `Returns`, `CalleeSaved` and `Bytes` (section 1.6).
 4. Verify `putchar`, then `setjmp` and `longjmp`.
 
 Later: the C library's functions with loops (section 1.2.1): the parser
@@ -1778,37 +1801,54 @@ in "Scope at a glance".
 
 For the first milestone:
 
-1. Whether the beacon core of section 1.3.1 replaces Kraken's
-   `Executable` for these proofs, with `Program` (section 1.3.2) or
-   `List Instr` (section 1.3.3, recommended for now), and whether
-   `simp only` reduces `Operation.interp` fast enough or Kraken's
-   `kdeltaBetaOnly` simproc is needed.
-2. Whether objdump's exact operand syntax parses for the three
-   functions (`mov x0, #0x0  // #0` in `setjmp`, `cinc x0, x0, eq  // eq =
-   none` in `longjmp`, tabs between mnemonic and operands). All their
-   mnemonics occur in Kraken's parser, but only feeding the listings to it
-   will tell (step 1 of section 7).
-3. The beacon tactic: parsing the string at elaboration time, comparing it
+1. Whether `simp only` with the `@[kstep]` declarations reduces
+   `Operation.interp` fast enough, or Kraken's `kdeltaBetaOnly` simproc is
+   needed (section 1.3.1).
+2. The beacon tactic: parsing the string at elaboration time, comparing it
    with the fetched instruction, the address as symbol plus offset
-   (section 1.3).
-4. Spec conventions (section 1.6): returning means reaching the initial
+   (section 1.3), and how it decides address equalities on `Int64`
+   (ToySys uses `bv_decide` on `BitVec 64`).
+3. Spec conventions (section 1.6): returning means reaching the initial
    `x30`; `CalleeSaved` lists `x19` to `x29` and `sp`; all other registers
    and the flags may change. Whether `Returns` should also say that the
    function does not touch memory outside its precondition (it does, via
-   the frame `R`, but only when the postcondition mentions `R`).
-5. The `Bytes` predicate (section 1.6), including the no-wrap side
+   the frame `R`, but only when the postcondition mentions `R`). Kraken's
+   `ret` sets the program counter to `Int64.ofInt x30.signed`, `Returns`
+   says `x30.toInt64`: a lemma, or the same form in `Returns`.
+4. The `Bytes` predicate (section 1.6), including the no-wrap side
    condition, and how `setjmp`'s 14 `stp` stores into a 112-byte buffer
    are best related to `jmpBuf` with Kraken's separation logic.
-6. `setjmp`/`longjmp`: `longjmp` does not fit `Returns`; its 64-bit test of
+5. `setjmp`/`longjmp`: `longjmp` does not fit `Returns`; its 64-bit test of
    `x1` versus C's `int val` (section 1.6).
-7. Confirming that rebuilding at the pinned imx-atf commit with the
-   pinned toolchain gives the same listings (section 4.10), and where CI
-   runs: it needs the Arm GNU Toolchain and a BL31 build.
-8. Stating the trusted base next to each theorem (section 1.1).
+6. Which `putchar`: the build defines it weakly in `libc/putchar.o` and
+   strongly in `bl31/multi_console.o`, so the listing script's lookup
+   (step 4 of section 4.7.2) finds two object files. Proposal: the script
+   looks only in `libc/`, since the listings are for `AtfLibc`.
+   (`bl31.elf` contains the strong one, so the theorem about libc's
+   `putchar` is about code that is not linked; it remains the simplest
+   test of the whole path.)
+7. Lean's module system: ADTF's Lean files are modules (`module` in
+   `ADTF/HelloWorld.lean`), and a definition's body is not visible in
+   importing modules unless it is exposed. Proofs need to unfold
+   `longjmp_o`, so the listing template of section 4.7.1 probably needs
+   `module`, `public import` and `@[expose] public def`; to be checked with
+   the pinned Lean.
+8. Where the `aarch64-atf` branch lives: the `kraken` submodule's URL is
+   upstream (`github.com/AeneasVerif/kraken`), so a clean checkout can
+   only fetch the branch's commits if they are pushed there or the URL in
+   `.gitmodules` points to a fork.
+9. CI: ADTF has none yet, and its `origin` is a local repository. Where CI
+   runs, how it installs the pinned Arm GNU Toolchain, and whether it
+   builds BL31, Kraken and the proofs in one job; also confirming that a
+   clean rebuild at the pinned commit with the pinned toolchain gives the
+   committed listings (section 4.10).
+10. Stating the trusted base next to each theorem (section 1.1).
+11. A complete sample proof: section 1.6 has specs but no proof. Writing
+    `putchar_spec`'s proof first (unfold `Returns`, one step with
+    `step_cps`, the `ret` beacon, `Eventually.done`) would test the core
+    of section 1.3.1 before the tactic is general.
 
 For later:
-
-1. Symbols outside the functionFor later:
 
 1. Symbols outside the function: Kraken gives them the address -1
    (section 4.6); needed for `atexit` and most of section 1.2.2.
