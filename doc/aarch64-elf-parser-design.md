@@ -606,9 +606,9 @@ on the BL31 build directory.
 - Instructions missing from Kraken are added to Kraken's `Operation` without
   semantics; executing them yields `Effects.unimplemented` (section 4.4).
 - An ELF encoder is written too. A Kraken test checks the round trip on all
-  object files and executables in a directory, recursively; Kraken's test suite runs it on a
-  few committed object files, and during development it runs on the BL31
-  build directory (section 5.4).
+  object files and executables in a directory, recursively; Kraken's test
+  suite runs it on a few committed object files, and during development it
+  runs on the BL31 build directory (section 5.4).
 - The layout details needed for byte equality are kept in a separate
   `Layout` (section 5.3); the constant fields and the zero padding are
   checked by the parser instead of stored (section 5.2).
