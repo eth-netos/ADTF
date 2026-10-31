@@ -13,27 +13,29 @@ work; the next section summarizes both.
 
 First milestone:
 
-- Targets: the 23 functions of TF-A's C library that make no calls and
-  refer to no other section (section 1.2.1), e.g. `strlen`, `memcpy`,
-  `memcmp`, `memset`, `strtoul`, `setjmp`/`longjmp`. Section 1.6 has
+- Targets: the functions of TF-A's C library that make no calls, refer to
+  no other section and contain no loop (section 1.2.1): `putchar`,
+  `setjmp`, `longjmp`, 22 instructions without branches. Section 1.6 has
   sample specs. Proofs use instruction beacons that take objdump's text as
   a string (section 1.3).
 - Input: the objdump listings of these functions, committed verbatim inside
   Lean files, turned into Kraken `Program`s by an elaborator; a script
   regenerates the listings from the pinned BL31 build and diffs them
   (section 4.7). No ELF parser (section 4.6).
-- Work in Kraken: the parser accepts objdump's branch-target form
-  `14 <strlen+0x14>` (section 4.8); the elaborator; the beacon tactic; spec
-  helpers and a loop rule for loops that end on data (section 1.6).
+- Work in Kraken: the elaborator; the beacon tactic; spec helpers
+  (section 1.6).
 - Not needed: the instructions that Kraken lacks (none of the targets
   contains one, section 4.4), symbols outside the function (section 4.6),
-  relocations.
+  relocations, branch targets (section 4.8), loop rules.
 - Trusted base: objdump, the elaborator's conversion of the listing,
   Kraken's parser and Kraken's semantics. The layout of the object file
   (4-byte instructions, section 4.9) is a hypothesis of each theorem.
 
 Later, roughly in this order:
 
+- The 20 other C library functions without calls, which loop (section
+  1.2.1): a loop rule, objdump's branch targets in Kraken's parser
+  (section 4.8), conditional branches in the beacon tactic.
 - Other platform-independent functions without calls (section 1.2.2),
   among them some that need symbols outside the function, such as `atexit`
   (section 4.6).
@@ -83,9 +85,9 @@ Success is now: Lean theorems, checked by Lean, about a few interesting
 functions of BL31, stated about the code as it is in the object files that
 the BL31 build produced, and proven with instruction beacons (section 1.3).
 For the first milestone, these are functions from TF-A's C library that
-make no calls, and exercise loops, memory buffers, arithmetic and non-local
-control flow (section 1.2.1). Other platform-independent functions without
-calls follow (section 1.2.2), then calls (section 1.2.3). The TRDC
+make no calls and contain no loops (section 1.2.1); the C library's
+functions with loops come next, then other platform-independent functions
+without calls (section 1.2.2), then calls (section 1.2.3). The TRDC
 functions (the Trusted Resource Domain Controller, which the i.MX 93 uses to
 restrict which bus masters may access which memory and peripherals) are the
 eventual goal, but need a TRDC semantics combined with Kraken's ISA
@@ -102,19 +104,21 @@ Each function is in its own section in its object file
 (`-ffunction-sections`). Sizes are from the object files. The features that
 a function exercises are what makes it interesting beyond its size.
 
-#### 1.2.1 First milestone: TF-A's C library, functions without calls
+#### 1.2.1 First milestone: TF-A's C library, functions without calls or loops
 
 Verifying the TRDC functions (section 1.2.4) needs a semantics of the TRDC,
 combined with Kraken's ISA semantics. That is planned via Sockeye's Lean
-backend, but too big for a first milestone. Calls are left for later too
-(section 1.2.3). The first milestone takes the functions of TF-A's C
-library (`lib/libc`, built into `build/imx93/release/libc/*.o`; not all of
-it is linked into `bl31.elf`, but all of it is in object files) that
+backend, but too big for a first milestone. Calls and loops are left for
+later too (section 1.2.3, and below). The first milestone takes the
+functions of TF-A's C library (`lib/libc`, built into
+`build/imx93/release/libc/*.o`; not all of it is linked into `bl31.elf`,
+but all of it is in object files) that
 
 - make no calls: no `bl`, `blr`, `br`, and no `b` to another function (a
   tail call), i.e. no `CALL26` or `JUMP26` relocation;
 - refer to no symbol outside their own section, i.e. have no relocation at
-  all (section 4.6).
+  all (section 4.6);
+- contain no loop, i.e. no branch to the same or a lower offset.
 
 The C library has 40 function symbols in 31 object files. 16 make calls
 (`abort`, `__assert`, `exit`, `memcpy_s`, `memmove`, `printf`, `puts`,
@@ -122,13 +126,24 @@ The C library has 40 function symbols in 31 object files. 16 make calls
 `unsigned_num_print.part.0` in `printf.o`, `strcpy_secure`, `strlcat`), and
 `atexit` refers to the global `exitfun` (section 1.2.2). The remaining 23
 contain no instruction that Kraken lacks (section 4.4), access no device or
-system registers, and have no relocations, so their listings are pure
-Kraken assembly apart from objdump's columns and branch-target annotations.
-Sizes are in instructions:
+system registers, and have no relocations. Only 3 of them have no loop, and
+these 3 have no branch at all, apart from the final `ret`:
 
-- `putchar` (1): `ret`; the C library's weak default, which returns its
-  argument (`#pragma weak putchar`). A test of the whole path from objdump
-  to a theorem.
+- `putchar` (1 instruction): `ret`; the C library's weak default, which
+  returns its argument (`#pragma weak putchar`). A test of the whole path
+  from objdump to a theorem.
+- `setjmp` (10) and `longjmp` (11), assembly (`lib/libc/aarch64/setjmp.S`,
+  both in `libc/setjmp.o`): save and restore the callee-saved registers,
+  `x30` and `sp`, with `stp` and `ldp`. `longjmp` does not return to its
+  caller but to where `setjmp` was called, so its spec is about control
+  flow.
+
+So the first milestone is 22 instructions in two object files, enough to
+build and test the whole path: listings, elaborator, script, beacons, spec
+helpers, memory reasoning for a 112-byte buffer.
+
+Later, next: the other 20, which loop. Sizes are in instructions:
+
 - `strlen` (7): the simplest loop; precondition: a NUL-terminated string.
 - Read-only searches: `strnlen` (9), `strnlen_secure` (10), `memchr` (11),
   `strchr` (9), `strrchr` (10, `csel`), `memrchr` (14).
@@ -144,16 +159,13 @@ Sizes are in instructions:
   compares with a reference function in Lean.
 - `unsigned_num_print` (76, static, in `snprintf.o`): number to digits with
   `udiv` and `msub`, into a buffer.
-- `setjmp` (10), `longjmp` (11), assembly (`lib/libc/aarch64/setjmp.S`):
-  save and restore the callee-saved registers, `x30` and `sp`. `longjmp`
-  does not return to its caller but to where `setjmp` was called, so its
-  spec is about control flow.
 
-Suggested order, each adding one thing: `putchar` (the whole path, no
-loop), `strlen` (a loop that ends on data), `memcpy` (writes, two buffers),
+They need a loop rule, branch targets (section 4.8) and conditional
+branches in the beacon tactic. Suggested order, each adding one thing:
+`strlen` (a loop that ends on data), `memcpy` (writes, two buffers),
 `memcmp` (a result computed from two buffers), `memset` (alignment, words,
 bit-level reasoning), `strtoul` (arithmetic with overflow, a reference
-function), `setjmp`/`longjmp` (non-local control flow).
+function).
 
 #### 1.2.2 Later: other platform-independent functions without calls
 
@@ -454,11 +466,8 @@ Needed for the first milestone, and not in Kraken yet:
 - The path from objdump's output into Lean (section 4.7): committed
   objdump listings, read by an elaborator that turns them into a Kraken
   `Program`, and a script that regenerates and diffs them.
-- Kraken's parser accepting objdump's branch-target form
-  `14 <strlen+0x14>` (section 4.8).
 - The layout hypothesis (section 4.9) and the spec conventions of
-  section 1.6 (`Returns`, callee-saved registers, string and buffer
-  predicates).
+  section 1.6 (`Returns`, callee-saved registers, a buffer predicate).
 - Instruction beacons taking a string (section 1.3).
 
 Needed for the first milestone, and already in Kraken (`main` at
@@ -486,6 +495,9 @@ Needed for the first milestone, and already in Kraken (`main` at
 
 Later:
 
+- For the C library functions with loops: Kraken's parser accepting
+  objdump's branch-target form `14 <strlen+0x14>` (section 4.8), a loop
+  rule, conditional branches in the beacon tactic, string predicates.
 - Adding the instructions that Kraken lacks to `Operation` and the parser
   (section 4.4); no first-milestone function contains one.
 - External symbols: Kraken's `Executable.step` resolves labels only from
@@ -541,6 +553,11 @@ that are new. Each `*_o` program comes from the committed objdump listing
 (section 4.7). With the beacon core of section 1.3.1, `ObjLayout` becomes
 `Loaded code (syms "strlen") strlen_o`, and `Returns` uses `Code.stepWp`
 instead of `straightlineStep`; the specs stay the same otherwise.
+
+The first milestone needs the specs of `putchar`, `setjmp` and `longjmp`,
+and of the helpers `ObjLayout`, `CalleeSaved`, `Returns` and `Bytes`. The
+others (`strlen` to `strtoul`, and `CString`) are for the functions with
+loops, later; `strlen_o` shows what a listing with branches looks like.
 
 ```lean
 /-- The code of `strlen` in `libc/strlen.o`, from the committed listing. -/
@@ -1242,12 +1259,14 @@ parser. For the C library functions of section 1.2.1:
 - The instructions and their offsets: objdump's listing of the function's
   section (each function is its own section, section 2).
 - Where the function starts: objdump's `<strlen>:` line.
-- No relocations at all: none of the 23 functions refers to a symbol
-  outside its own section, and branches inside a section need no
-  relocation. `-r` prints nothing for them.
+- No relocations at all: none of the C library's 23 functions without
+  calls except `atexit` refers to a symbol outside its own section, and
+  branches inside a section need no relocation. `-r` prints nothing for
+  them.
 
-So the only labels in a first-milestone `Program` are the function's own
-symbol and branch targets relative to it (section 4.8).
+So the only label in a first-milestone `Program` is the function's own
+symbol; the first-milestone functions have no branches, and the branch
+targets of the later ones are relative to that symbol (section 4.8).
 
 Symbols outside the function (later). Kraken's `Executable.step` and
 `Executable.straightline` use `Executable.labels`, which gives each label
@@ -1319,35 +1338,136 @@ Options:
 
 Decision: option 3.
 
-- One Lean file per object file (section 4.10) holds the listing of
-  each function to verify, as printed by
-  `aarch64-none-elf-objdump -d -r --disassemble=strlen libc/strlen.o`,
-  without objdump's file header line (it contains the path). A comment
-  above it records the command; the inputs are pinned elsewhere
-  (section 4.10).
-- The elaborator `objdumpAArch64` checks the `<strlen>:` header and that
-  the offsets start at 0 and grow by 4, drops the offset and instruction
-  word columns, turns `<strlen>:` into the label `strlen:`, and passes the
-  rest to Kraken's parser, which skips objdump's `//` comments and reads
-  its branch targets (section 4.8). In the first milestone it rejects
-  everything else: relocation lines, data lines (`.word`), further symbols.
-- A script in ADTF (it needs the imx-atf build) regenerates these files
-  from the object files of the pinned build; `--check` writes them to a
-  temporary directory and diffs them with the committed ones, failing on
-  any difference. It only writes the files with listings, never the
+- One Lean file per object file (section 4.7.1) holds the output of
+  `aarch64-none-elf-objdump -d -r --disassemble=strlen libc/strlen.o`
+  for each function to verify, verbatim. A comment above it records the
+  command; the inputs are pinned elsewhere (section 4.10).
+- The elaborator `objdumpAArch64` skips objdump's header lines, checks the
+  `<strlen>:` line and that the offsets start at 0 and grow by 4, drops
+  the offset and instruction word columns, turns `<strlen>:` into the
+  label `strlen:`, and passes the rest to Kraken's parser, which skips
+  objdump's `//` comments (and later reads its branch targets,
+  section 4.8). It rejects everything else: relocation lines, data lines
+  (`.word`), further symbols.
+- A script in ADTF (it needs the imx-atf build, section 4.7.2)
+  regenerates these files from the object files of the pinned build;
+  `--check` diffs them with the committed ones, failing on any
+  difference. It only writes the files with listings, never the
   proofs. The C library's object files contain no time stamps or
   build paths (checked with `strings`), so a rebuild at the pinned commit
   with the pinned toolchain should give the same listings.
 
 Why the proofs are then about this output: each theorem mentions `strlen_o`,
 whose value Lean computes from the string literal while elaborating
-`Code.lean`, and Lean checks the proof against that value. The check script
+the listing file, and Lean checks the proof against that value. The check script
 ties the string literal to objdump's output for the object file of the
 pinned build. Beacons add a redundant check inside the proofs. What remains
 trusted is objdump, the elaborator's conversion, and Kraken's parser and
 semantics.
 
-### 4.8 Branch targets (first milestone)
+#### 4.7.1 A listing file
+
+The script writes one Lean file per object file, with one definition per
+function to verify, e.g. `src/lean/ADTF/AtfLibc/Listing/Setjmp.lean` for
+`libc/setjmp.o` (proofs go into separate files, section 4.10):
+
+```lean
+-- Generated by src/scripts/atf-listings.py from libc/setjmp.o of the
+-- imx-atf build. Do not edit; rerun the script instead.
+import Kraken.AArch64.Objdump
+
+namespace ADTF.AtfLibc.Listing
+
+/-- `aarch64-none-elf-objdump -d -r --disassemble=longjmp libc/setjmp.o`,
+run in `imx-atf/build/imx93/release`. -/
+def longjmp_o : Program := objdumpAArch64(r#"
+
+libc/setjmp.o:     file format elf64-littleaarch64
+
+
+Disassembly of section .text.asm.setjmp:
+
+Disassembly of section .text.asm.longjmp:
+
+0000000000000000 <longjmp>:
+   0:	a9467c07 	ldp	x7, xzr, [x0, #96]
+   4:	a9405013 	ldp	x19, x20, [x0]
+   8:	a9415815 	ldp	x21, x22, [x0, #16]
+   c:	a9426017 	ldp	x23, x24, [x0, #32]
+  10:	a9436819 	ldp	x25, x26, [x0, #48]
+  14:	a944701b 	ldp	x27, x28, [x0, #64]
+  18:	a945781d 	ldp	x29, x30, [x0, #80]
+  1c:	910000ff 	mov	sp, x7
+  20:	ea010020 	ands	x0, x1, x1
+  24:	9a801400 	cinc	x0, x0, eq	// eq = none
+  28:	d65f03c0 	ret
+"#)
+
+/-- `aarch64-none-elf-objdump -d -r --disassemble=setjmp libc/setjmp.o`,
+run in `imx-atf/build/imx93/release`. -/
+def setjmp_o : Program := objdumpAArch64(r#"
+...
+"#)
+
+end ADTF.AtfLibc.Listing
+```
+
+- The string is objdump's standard output, byte for byte, including its
+  tabs and the header lines. objdump runs in the build directory with a
+  relative path, so the header line contains no absolute path. A raw string
+  literal (`r#"..."#`) needs no escaping; Lean accepts tabs in it (checked
+  with the pinned Lean version, also with a custom `str` elaborator
+  argument like `objdumpAArch64`'s).
+- objdump prints a `Disassembly of section` line for every executable
+  section of the file, even with `--disassemble=longjmp`. The elaborator
+  skips these and the file header line, and requires exactly one symbol
+  block, `<longjmp>:`, at offset 0.
+- `--disassemble=sym` takes one symbol (with several, objdump uses only
+  the last), hence one objdump run and one definition per function.
+
+#### 4.7.2 The script
+
+Python 3, standard library only (`subprocess`, `pathlib`, `difflib`): it
+calls the toolchain and git, compares text, and writes files, which is
+awkward in Bash and has no advantage in Lean. It does not parse objdump's
+output; all interpretation of the listing is in the Lean elaborator, so
+there is one converter, checked by Lean, not two. What it does beyond
+calling objdump:
+
+1. Toolchain check: compares the first lines of `gcc --version` and
+   `objdump --version` (prefix from `CROSS_COMPILE`, as for TF-A's build)
+   with the committed version file, and fails with a message that names
+   the file (section 4.10).
+2. imx-atf check: `git submodule status imx-atf` must show the recorded
+   commit (no `+`, `-` or `U`), and `git -C imx-atf status --porcelain
+   --untracked-files=no` must be empty.
+3. Build: runs `make PLAT=imx93 bl31` in `imx-atf` with the pinned
+   toolchain (the same command as the build script; incremental, so a few
+   seconds when nothing changed), so that the object files belong to the
+   pinned sources.
+4. For each object file in its table (object file, Lean file name,
+   functions): checks that `readelf -p .comment` names the pinned GCC.
+5. For each function: runs objdump, checks that the output contains the
+   line `0000000000000000 <sym>:` exactly once (for an unknown symbol
+   objdump prints only the headers and still exits with 0) and does not
+   contain `"#`, which would end the raw string.
+6. Renders the Lean files from a fixed template.
+7. Without options, writes the Lean files. With `--check`, writes nothing,
+   compares the rendered text with the committed files, prints a unified
+   diff, and exits with 1 on any difference, on a missing file, and on a
+   file in `Listing/` that the table does not produce.
+
+The table of functions is in the script; adding a function to verify means
+adding it there and rerunning the script. All in all about 120 lines of
+Python. The script is not part of the trusted base in a deep way: it copies
+objdump's output verbatim, and a reader can compare a listing with
+objdump's output by eye.
+
+### 4.8 Branch targets (later)
+
+The first-milestone functions have no branches apart from `ret`; the C
+library's functions with loops need this section.
+
 
 objdump prints a branch inside a function as `cbnz w2, 14 <strlen+0x14>`:
 `14` is the target's offset in the section, in hexadecimal without `0x`,
@@ -1404,8 +1524,8 @@ architecture requires anyway for instruction addresses.
 
 Kraken, on a new branch `aarch64-atf` of the `kraken` submodule:
 
-- `Kraken/AArch64/Parser/Basic.lean`: objdump's branch-target form and
-  `sym+off` (section 4.8).
+- `Kraken/AArch64/Parser/Basic.lean`, later: objdump's branch-target form
+  and `sym+off` (section 4.8).
 - A new file for the `objdumpAArch64` elaborator (section 4.7).
 - New files for the beacons, separate from Kraken's existing files: the
   core of section 1.3.1, the `instr` tactic, and their tests.
@@ -1417,8 +1537,9 @@ ADTF, on `main`:
   committed listings, regenerated by the script, and separate files with
   the specs and proofs, which the script never touches; spec helpers
   (`Returns`, `CalleeSaved`, `Bytes`, `CString`) in a common file.
-- The regenerate-and-diff script of section 4.7, and a script that builds
-  BL31, outside the Lean project (e.g. `src/scripts/`).
+- The regenerate-and-diff script of section 4.7.2
+  (`src/scripts/atf-listings.py`), and a script that builds BL31, outside
+  the Lean project.
 - The toolchain version file (e.g. `src/toolchain/arm-gnu-toolchain.version`).
 
 Pinned inputs:
@@ -1487,15 +1608,17 @@ For the first milestone:
 - Goal: proofs about functions in AArch64 object files, composable under
   linking later. Success: a few interesting BL31 functions verified
   (section 1.1). The first milestone takes the functions of TF-A's C
-  library that make no calls and refer to no other section (section 1.2.1).
+  library that make no calls, refer to no other section and contain no
+  loop: `putchar`, `setjmp`, `longjmp` (section 1.2.1).
 - Proofs use instruction beacons, `instr "<objdump text>" at sym + off`,
   whose string is parsed by Kraken's assembly parser (section 1.3).
 - The objdump listings of the verified functions are committed verbatim
   inside Lean files and elaborated into Kraken `Program`s; a script
   regenerates and diffs them (section 4.7). No ELF parser and no Lean
   decoder in the first milestone (section 4.6).
-- Kraken's parser accepts objdump's branch-target form `14 <strlen+0x14>`
-  as `.add (.label "strlen") (.int64 0x14)` (section 4.8).
+- The listing files hold objdump's output verbatim in raw string
+  literals; the script is Python with the standard library only, and does
+  not parse objdump's output (sections 4.7.1 and 4.7.2).
 - Each theorem assumes the object file's layout: 4-byte instructions,
   0-byte labels, 4-byte-aligned start (section 4.9).
 - No encoders and no round trips (section 5).
@@ -1507,7 +1630,10 @@ For the first milestone:
 
 For later:
 
-- Other platform-independent functions without calls (section 1.2.2), then
+- Kraken's parser accepts objdump's branch-target form `14 <strlen+0x14>`
+  as `.add (.label "strlen") (.int64 0x14)` (section 4.8).
+- The C library's functions with loops (section 1.2.1), then other
+  platform-independent functions without calls (section 1.2.2), then
   calls (section 1.2.3); the TRDC functions come after that, once a TRDC
   semantics from Sockeye's Lean backend can be combined with Kraken's
   (section 1.2.4).
@@ -1536,23 +1662,24 @@ For later:
 
 First milestone:
 
-1. Extend Kraken's parser for objdump's branch-target form (section 4.8).
-2. Write the `objdumpAArch64` elaborator, the toolchain version file, and
-   the regenerate-and-diff script with its version check (sections 4.7 and
-   4.10), starting with `putchar` and `strlen`.
-3. Write the beacon core and the `instr _ at _` tactic, taking a string,
+1. Write the `objdumpAArch64` elaborator, the toolchain version file, the
+   build script and the listing script with its checks (sections 4.7 and
+   4.10), for `putchar`, `setjmp` and `longjmp`.
+2. Write the beacon core and the `instr _ at _` tactic, taking a string,
    in separate files in Kraken (sections 1.3.1 and 4.10).
-4. Define `Returns`, `CalleeSaved`, `Bytes` and `CString` (section 1.6),
-   with `Loaded` instead of `ObjLayout` if section 1.3.1 is adopted, and a
-   loop rule for loops that end on data.
-5. Verify the functions of section 1.2.1 in the suggested order: `putchar`,
-   `strlen`, `memcpy`, `memcmp`, `memset`, `strtoul`, `setjmp`/`longjmp`.
+3. Define `Returns`, `CalleeSaved` and `Bytes` (section 1.6), with
+   `Loaded` instead of `ObjLayout` if section 1.3.1 is adopted.
+4. Verify `putchar`, then `setjmp` and `longjmp`.
 
-Later: the other functions without calls (section 1.2.2), external symbols
-(section 4.6), calls (section 1.2.3), then the ELF container parser for
-object files when a target needs data sections (first: the constant tables
-of `get_el_str` and `plat_log_get_prefix`, and `vsnprintf`'s jump table in
-`.rodata`), then the rest of the "Later" list in "Scope at a glance".
+Later: the C library's functions with loops (section 1.2.1): the parser
+extension for branch targets (section 4.8), a loop rule, conditional
+branches in the beacon tactic, `CString`, in the order suggested in
+section 1.2.1. Then the other functions without calls (section 1.2.2),
+external symbols (section 4.6), calls (section 1.2.3), then the ELF
+container parser for object files when a target needs data sections
+(first: the constant tables of `get_el_str` and `plat_log_get_prefix`, and
+`vsnprintf`'s jump table in `.rodata`), then the rest of the "Later" list
+in "Scope at a glance".
 
 ## 8. Open points
 
@@ -1562,37 +1689,31 @@ For the first milestone:
    `Executable` for these proofs, and whether `simp only` reduces
    `Operation.interp` fast enough or Kraken's `kdeltaBetaOnly` simproc is
    needed.
-2. Whether objdump's exact operand syntax parses for all 23 functions
-   (`mov x0, #0x0  // #0`, `b.ne`, `cinc x0, x0, eq  // eq = none`, ...).
-   All their mnemonics occur in Kraken's parser, but only feeding the
-   listings to it will tell (step 2 of section 7).
+2. Whether objdump's exact operand syntax parses for the three
+   functions (`mov x0, #0x0  // #0` in `setjmp`, `cinc x0, x0, eq  // eq =
+   none` in `longjmp`, tabs between mnemonic and operands). All their
+   mnemonics occur in Kraken's parser, but only feeding the listings to it
+   will tell (step 1 of section 7).
 3. The beacon tactic: parsing the string at elaboration time, comparing it
-   with the fetched instruction, the address as symbol plus offset, two
-   goals for a conditional branch (section 1.3).
+   with the fetched instruction, the address as symbol plus offset
+   (section 1.3).
 4. Spec conventions (section 1.6): returning means reaching the initial
    `x30`; `CalleeSaved` lists `x19` to `x29` and `sp`; all other registers
    and the flags may change. Whether `Returns` should also say that the
    function does not touch memory outside its precondition (it does, via
    the frame `R`, but only when the postcondition mentions `R`).
-5. A loop rule: Kraken's `reg_dec_loop` counts a register down and is used
-   only in an x86-64 example. `strlen`, `memchr`, `strcmp` and `strtoul`
-   loop until they see a certain byte, so they need a rule with an
-   invariant and a measure (e.g. the bytes left before the NUL).
-6. Memory predicates: Kraken has byte lists at an address (`List.At`) with
-   separation logic. `Bytes` and `CString` (section 1.6) are new, including
-   the no-wrap side condition. Overlapping read-only buffers (`memcmp`,
-   `strcmp`) need a second form of spec.
-7. Reference functions in Lean: `strtoulRef` and its relatives for
-   `strtol`, `strtoull`, `strtoll`; `strtok_r`'s state; the digits of
-   `unsigned_num_print`. Each one is part of what a reader has to trust, so
-   it should follow the C source closely.
-8. `setjmp`/`longjmp`: `longjmp` does not fit `Returns`; its 64-bit test of
+5. The `Bytes` predicate (section 1.6), including the no-wrap side
+   condition, and how `setjmp`'s 14 `stp` stores into a 112-byte buffer
+   are best related to `jmpBuf` with Kraken's separation logic.
+6. `setjmp`/`longjmp`: `longjmp` does not fit `Returns`; its 64-bit test of
    `x1` versus C's `int val` (section 1.6).
-9. Confirming that rebuilding at the pinned imx-atf commit with the
+7. Confirming that rebuilding at the pinned imx-atf commit with the
    pinned toolchain gives the same listings (section 4.10).
-10. Stating the trusted base next to each theorem (section 1.1).
+8. Stating the trusted base next to each theorem (section 1.1).
 
 For later:
+
+1. Symbols outside the functionFor later:
 
 1. Symbols outside the function: Kraken gives them the address -1
    (section 4.6); needed for `atexit` and most of section 1.2.2.
@@ -1604,3 +1725,13 @@ For later:
    several files are combined.
 4. The instructions that Kraken lacks, and the coverage test (sections 4.4
    and 5.2).
+5. For the C library's functions with loops: whether objdump's syntax
+   parses for all 20; a loop rule (Kraken's `reg_dec_loop` counts a
+   register down and is used only in an x86-64 example; `strlen`,
+   `memchr`, `strcmp` and `strtoul` loop until they see a certain byte, so
+   they need a rule with an invariant and a measure, e.g. the bytes left
+   before the NUL); two goals for a conditional branch in the beacon
+   tactic; `CString`; a second spec form for overlapping read-only buffers
+   (`memcmp`, `strcmp`); reference functions in Lean (`strtoulRef` and its
+   relatives, `strtok_r`'s state, the digits of `unsigned_num_print`), each
+   following the C source closely, since a reader has to trust them.
