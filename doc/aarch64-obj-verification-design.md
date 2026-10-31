@@ -1,29 +1,234 @@
-# AArch64 ELF parser in Lean: plan and design decisions
+# Verifying AArch64 object files in Lean: plan and design decisions
 
-This document records the plan and the design decisions for an AArch64 ELF
-parser written in Lean. It is extended as the design develops.
+This document records the plan and the design decisions for verifying the
+code in AArch64 object files with Kraken (the `kraken` submodule). It is
+extended as the design develops. It started as the design of an ELF parser
+(sections 2 to 5); section 1 describes the goal that replaced that, and
+section 1.5 which parts of the parser design are still needed.
 
 ## 1. Goal
 
-Read AArch64 ELF files into Lean, so that their code can be reasoned about
-with Kraken (the `kraken` submodule). The first use case is the object files
-and the linked `bl31.elf` of TF-A for the i.MX 93 (the `imx-atf` submodule).
+Write proofs about the functions in AArch64 object files (`.o`), as the
+compiler and assembler produce them, using Kraken. The first use case is
+TF-A's BL31 for the i.MX 93 (the `imx-atf` submodule), whose build leaves
+114 object files (section 2).
 
-- Both relocatable object files (`.o`, `ET_REL`) and executables
-  (`ET_EXEC`) are in scope. They share the ELF container format (file
-  header, section headers, symbol table, string tables), but differ in what
-  is filled in: an object file has relocation sections, section addresses of
-  0 and possibly undefined symbols, while an executable has program headers
-  (segments), final addresses and usually no relocations.
-- Instructions are decoded into Kraken's `AArch64.Operation` inductive, so
-  that Kraken's semantics and tactics apply to them.
-- Kraken's `Directive`/`Program`/`Executable` layer, which describes one
-  contiguous program with a single start address, probably does not match an
-  ELF file; see section 3.
+Later, the proofs should compose as the object files get linked: a proof
+about each object file, plus facts about how the linker placed them, should
+give a proof about the linked `bl31.elf`. This is postponed, but the design
+keeps it in mind (section 1.4).
 
 Constraint: only open-source software is used (the two proprietary NXP
 firmware files that the i.MX 93 boot image needs are the only exception, and
-they are not needed for this parser).
+they are not needed here).
+
+### 1.1 Definition of success
+
+Earlier, the plan measured progress by round-trip properties of an ELF
+parser and encoder (section 5). These are tests of a tool, not the goal:
+they say that a file was read correctly, not that anything about its code
+was proven. They also make less sense once instructions come from objdump
+(section 4.5), since there is no Lean decoder whose output could be
+encoded back (section 5.0).
+
+Success is now: Lean theorems, checked by Lean, about a few interesting
+functions of BL31, stated about the code as it is in the object files that
+the BL31 build produced, and proven with instruction beacons (section 1.3).
+"Interesting" means the TRDC functions (the Trusted Resource Domain
+Controller, which the i.MX 93 uses to restrict which bus masters may access
+which memory and peripherals), plus functions that exercise features that a
+proof about real firmware needs. Section 1.2 lists candidates.
+
+Each theorem says what the function does to registers, memory and device
+registers, under which preconditions, and that it returns to its caller.
+What the trusted base of such a theorem is (objdump, the converter of
+section 4.5, Kraken's semantics) is stated next to it.
+
+### 1.2 Candidate functions
+
+Sizes are from `bl31.elf`; each function is in its own section in its object
+file (`-ffunction-sections`). The features that a function exercises are
+what makes it interesting beyond its size.
+
+TRDC functions, from `drivers/nxp/trdc/imx_trdc.c` (`imx_trdc.o`) and
+`plat/imx/imx93/trdc.c` (`trdc.o`), roughly in the order in which they could
+be done:
+
+- `trdc_get_mbc_base` (static, 32 bytes): leaf; reads `TRDC_HWCFG0` (MMIO,
+  `ldrh`); `csel`.
+- `trdc_mbc_enabled`, `trdc_mrc_enabled` (12 bytes each): one MMIO read, bit
+  test.
+- `trdc_mrc_set_control` (60 bytes): call to a static function in another
+  section (`CALL26` against a section symbol); stack frame (`stp x29, x30`);
+  `ccmp`; MMIO write.
+- `trdc_mrc_rgn_config` (152 bytes): the MRC region descriptor writes; alignment
+  masks; 8 arguments.
+- `trdc_mbc_blk_config` (220 bytes): `switch` compiled to a comparison tree;
+  `umaddl`; read-modify-write of a 4-bit field of an MMIO register.
+- `trdc_mda_set_cpu` (132 bytes): 10 arguments, 2 of them on the stack
+  (`ldrb w8, [sp, #8]`); read-check-write-lock.
+- `trdc_mda_set_noncpu` (100 bytes): as above, 7 arguments.
+- `trdc_fuse_read` (88 bytes): global data (`fuse_data` in `.data`) via
+  `ADRP`/`ADD`/`LDST8` relocations; unrolled loop.
+- `trdc_mbc_set_control` (164 bytes): loop over a global table
+  (`trdc_mgr_blks`); early returns.
+- `trdc_mgr_mbc_setup` (164 bytes): loop of calls; callee specs used in a proof.
+- `trdc_setup` (524 bytes): nested loops of calls driven by a configuration
+  table in memory; the function whose spec says "the TRDC ends up configured as
+  the table says".
+- `trdc_config` (440 bytes): stretch goal: tables with pointers
+  (`R_AARCH64_ABS64` relocations in `.data.trdc_cfg_info`), the inlined ELE fuse
+  read (MMIO polling loop), a call to `NOTICE` (`printf`).
+
+The ToySys model (`doc/ToySys/System.lean`) already has a TRDC whose MRC
+region descriptors are written by a firmware program; the spec of
+`trdc_mrc_rgn_config` and `trdc_setup` can state their effect in the same
+terms, which is the link from these proofs to the system-level properties of
+ToySys.
+
+Other functions that exercise further features:
+
+- `imx_validate_ns_entrypoint` (20 bytes): security check: rejects non-secure
+  entry points below `PLAT_NS_IMAGE_OFFSET` (`0x80200000`); `csel`.
+- `plat_core_pos_by_mpidr` (28 bytes): pure bit manipulation, `csinv`.
+- `get_arm_std_svc_args` (12 bytes): returns the address of data in `.rodata`
+  (`ADRP`/`ADD`).
+- `memcpy` (32 bytes): byte loop: loop invariant, separation logic for two
+  buffers.
+- `memset`, `memmove` (104, 52 bytes): alignment cases; overlapping buffers.
+- `console_lpuart_putc` (56 bytes): assembly (`.S`); MMIO polling loop on a
+  status register, so termination depends on the device.
+- `psci_smc_handler` (332 bytes): `switch` compiled to a jump table (`ldrb` from
+  `.rodata`, `adr`, `br x3`); many calls.
+- `udelay` (104 bytes): indirect calls through a function pointer in global data
+  (`blr x0`); callee-saved registers `x19`-`x21`; `udiv`.
+- `psci_validate_power_state` and similar: tail call through a function pointer
+  (`br x16`).
+- `plat_my_core_pos` (16 bytes): `mrs mpidr_el1`: blocked until `mrs` has
+  semantics (section 4.4).
+- `spin_lock`, `spin_unlock` (32, 8 bytes): `ldaxr`/`stxr`/`wfe`/`sevl`/`stlr`:
+  blocked until these have semantics, and needs a model of other cores.
+- `flush_dcache_range` (56 bytes): `mrs ctr_el0`, `dc civac`, `dsb`: blocked as
+  above.
+
+The functions marked "blocked" are listed because they are interesting, but
+the first milestone avoids them, since their instructions get no semantics
+for now (section 4.4).
+
+### 1.3 Proof style: instruction beacons
+
+Proofs step through a function with an instruction beacon per instruction,
+as `doc/ToySys/ISA.lean` does with its `instr i at a` tactic: `i` is the
+instruction and `a` its address, both redundant (they follow from the program
+and the state), but checked, so that a proof script can be read next to a
+disassembly and fails at the first place where it and the code disagree.
+
+For object files, the natural form is the text that objdump prints, at the
+function's symbol plus the offset that objdump prints, e.g.
+
+```lean
+  instr "ccmp w5, #0x7, #0x2, ne" at trdc_mrc_set_control + 0x18
+```
+
+Kraken has no such tactic. Its `kstep` steps through straight-line code
+without naming the instructions. Porting `instr` means:
+
+- parsing the instruction with Kraken's assembly parser (so that objdump's
+  text can be pasted) and comparing it with the fetched `Operation`;
+- expressing the address relative to a symbol whose address the `Labels`
+  instance gives, since an object file has no addresses (section 1.4);
+- the special cases that ToySys has: conditional branches give two goals,
+  calls continue with the callee's spec.
+
+### 1.4 Composability under linking (postponed)
+
+What a proof about one object file can assume, so that proofs compose:
+
+- Addresses of symbols are parameters (Kraken's `Labels` class), not fixed
+  numbers: undefined symbols, and the sections of the object file itself,
+  get their addresses only from the linker. A relocation becomes an operand
+  that mentions the symbol (section 2).
+- A call to another function is justified by that function's spec, as a
+  hypothesis of the theorem. ToySys's `swap_swap_ok` does this with a
+  `Symbols` map and one `Loaded` hypothesis per function; linking then
+  amounts to discharging the hypotheses of one object file's theorems with
+  the theorems of another.
+- What the linker does has to be stated as facts about the linked file:
+  each section's bytes end up at its address, with the relocated fields
+  filled in. Checking this for `bl31.elf` needs the ELF container parser for
+  executables (sections 3 and 5) and an instruction encoder or decoder for
+  the relocated fields.
+- Kraken's `NOTES.md` discusses why its layout-based semantics makes
+  composition of programs hard, and plans to make the semantics depend only
+  on the addresses of the current and the next instruction, which would help.
+
+### 1.5 What of this design is still needed
+
+Still needed:
+
+- The objdump-based code layer (section 4.5): `objdump -d -r` output,
+  converted to assembly that Kraken's parser reads, with relocations as
+  `ConstExpr` operands. This replaces the Lean decoder for the first
+  milestone.
+- Adding the missing instructions to Kraken's `Operation`, parser and
+  printer without semantics (section 4.4). The first targets avoid them, but
+  the files contain them, so the converter must accept them.
+- An ELF container parser for object files (section 3), because the proofs
+  need what `objdump -d` does not give (section 4.5): the contents of data
+  sections (`fuse_data`, `trdc_mgr_blks`, the TRDC configuration tables),
+  relocations in data sections (`R_AARCH64_ABS64` in
+  `.data.trdc_cfg_info`), and the symbol table. Executables (`bl31.elf`) and
+  segments can wait until the composition step.
+- The mapping-symbol background (section 2.1) stays as an explanation of
+  why objdump can tell code from data; the converter itself does not need
+  them.
+
+New, and not in Kraken yet:
+
+- Instruction beacons (section 1.3).
+- MMIO with a device model. Every TRDC function accesses device registers.
+  Kraken's AArch64 semantics has `nonmem_load` and `nonmem_store` effects,
+  but its `Effects.All` maps them to `False`, so no MMIO access can be
+  verified yet. Kraken's x86-64 side has an example with a device state
+  (`Kraken/X64/Examples/IncrementMMIO.lean`), and ToySys has a `Platform`
+  with `read` and `write` relations; one of these designs has to come to
+  AArch64.
+- Calls: specs of callees as hypotheses, the link register, callee-saved
+  registers and the stack frame. Kraken's AArch64 examples on `main` have no
+  calls; the `vcgen` branch (Sebastian Graf's, not merged) has
+  frame-based specs and a call example for x86-64 only.
+- A way to state the initial contents of data sections in a precondition,
+  from the parsed ELF file.
+
+Already in Kraken (`main` at `c9aa45e`):
+
+- The assembly parser, accepting objdump's aliases (`mov`, `cmp`, `lsl`,
+  `cset`, `tst`, `ubfx`, ...), and `parseAArch64("...")` to write programs
+  in Lean files.
+- `ConstExpr` with `label`, `pg_hi21` and `lo12`, and the `Labels` class for
+  symbol addresses, which is what relocations need.
+- `Effects.unimplemented`, whose weakest precondition is `False`.
+- Symbolic execution (`kstep`, `kprologue`), separation logic for memory
+  (`=⋆`, `ecancel`, `load_sep`, `store_sep`), and `Eventually` with
+  `eventually_trans` and a loop rule (`reg_dec_loop`).
+- Kraken's README says it verifies code "disassembled from compiler output
+  (`.o` files)", but `main` contains no tool for that; the converter of
+  section 4.5 is new.
+
+Can go away, or is postponed:
+
+- The Lean instruction decoder (sections 4.1 to 4.3): postponed. objdump
+  takes its place. The `sail-arm` encodings are still the reference if a
+  Lean decoder or encoder is written later to take objdump out of the
+  trusted base (section 5.0).
+- The byte-exact ELF round trip and the `Layout` cruft (sections 5.1 to
+  5.4): postponed; comparing the parsed container with `readelf` output
+  tests the parser better (section 5.0).
+- The pretty-printer compared with objdump (section 5.6): dropped, since
+  objdump is now the source of the instructions, not an oracle.
+- The code-layer datatype `CodeItem`/`CodeSection` (section 3): replaced by
+  one Kraken `Program` per section, as Kraken's parser produces it, plus the
+  symbols of that section as labels.
 
 ## 2. Test inputs at hand
 
@@ -140,6 +345,8 @@ executable sections as code and keeping undecodable words as `undecoded`,
 with the caveat that data may be decoded as instructions.
 
 ## 3. Lean datatype for an ELF file (first sketch)
+
+See section 1.5 for which parts of this section are still needed.
 
 Two layers:
 
@@ -536,6 +743,29 @@ decoder (section 5.6).
 
 ## 5. Round-trip testing
 
+### 5.0 What round trips are still good for
+
+Round trips test a parser against an encoder; they were never a proof about
+the code (section 1.1). With instructions coming from objdump (section 4.5):
+
+- There is no Lean decoder, so there is nothing for an instruction round
+  trip (section 5.5) to test in that form.
+- The ELF container parser is still written in Lean and still in the
+  trusted base, since data sections, data relocations and symbols come from
+  it. It needs a test, but a comparison with GNU `readelf` (section 5.6,
+  last paragraphs) is the better one, since it is independent and catches
+  errors that a parser and an encoder make in the same way (section 5.1).
+  The byte-exact round trip and the `Layout` it needs (sections 5.2 and 5.3)
+  are postponed.
+- One round trip becomes more useful than before: checking objdump's output
+  against the bytes. With a Lean instruction encoder written from the
+  `sail-arm` encodings, `encodeInstr (parseAsm (objdump w)) = w` can be
+  checked for each instruction word of a verified function (relocated fields
+  as in the object file). If it holds, objdump and the converter drop out of
+  the trusted base: the theorem is then about the bytes, and only the Lean
+  encoder has to be trusted (or reviewed against `sail-arm`). This is
+  translation validation, and it is a later milestone.
+
 An ELF encoder for the container layer is feasible and small: the format is
 a fixed-size file header, two tables of fixed-size entries (program headers
 and section headers) and blobs of bytes at given offsets. Writing it is
@@ -727,6 +957,15 @@ on the BL31 build directory.
 
 ## 6. Decisions so far
 
+- Goal: proofs about functions in AArch64 object files, composable under
+  linking later. Success: a few interesting BL31 functions verified,
+  especially TRDC ones (section 1.1, candidates in 1.2).
+- Proofs use instruction beacons, `instr "<objdump text>" at sym + off`,
+  ported from ToySys to Kraken (section 1.3).
+- Instructions come from `objdump -d -r` through Kraken's assembly parser
+  (section 4.5); the Lean decoder is postponed. A Lean instruction encoder
+  that checks objdump's output against the bytes is a later milestone
+  (section 5.0).
 - The container layer is architecture-independent (ELF64 little-endian) and
   kept in a separate directory or file; the code layer is instantiated only
   for AArch64 for now (section 3).
@@ -740,20 +979,30 @@ on the BL31 build directory.
 - Express relocated operands with Kraken's `ConstExpr` (`label`, `pg_hi21`,
   `lo12`, `add`).
 - Words the decoder does not support are kept as `undecoded`, not rejected.
-- The decoder is agent-written Lean with encodings from `sail-arm`
-  (section 4.3).
+- If a decoder is written, it is agent-written Lean with encodings from
+  `sail-arm` (section 4.3); postponed (section 1.5).
 - Instructions missing from Kraken are added to Kraken's `Operation` without
   semantics; executing them yields `Effects.unimplemented` (section 4.4).
   Adding them to Kraken's assembly parser (and printer) is fine too, still
   without semantics (section 4.5).
-- An ELF encoder is written too. A Kraken test checks the round trip on all
-  object files and executables in a directory, recursively; Kraken's test
-  suite runs it on a few committed object files, and during development it
-  runs on the BL31 build directory (section 5.4).
-- The layout details needed for byte equality are kept in a separate
+- Postponed (section 5.0): an ELF encoder and a Kraken test of the round
+  trip on all object files and executables in a directory, recursively;
+  Kraken's test suite would run it on a few committed object files, and
+  during development on the BL31 build directory (section 5.4). Postponed
+  with it: the layout details needed for byte equality, kept in a separate
   `Layout` (section 5.3); the constant fields and the zero padding are
   checked by the parser instead of stored (section 5.2).
 
 ## 7. Next steps
 
-To be decided in the next prompts.
+1. Add the missing instructions to Kraken's `Operation` and parser, without
+   semantics (section 4.4).
+2. Write the objdump-to-Kraken converter for `imx_trdc.o` (section 4.5).
+3. Port the `instr _ at _` beacon tactic from ToySys to Kraken (section 1.3).
+4. Verify `trdc_get_mbc_base`, which needs an MMIO read, so decide how MMIO
+   and device state are modelled in Kraken's AArch64 semantics first
+   (section 1.5).
+5. Calls: verify `trdc_mrc_set_control` using the spec of
+   `trdc_get_mrc_base`.
+6. The ELF container parser for object files, for data sections
+   (`trdc_fuse_read`).
