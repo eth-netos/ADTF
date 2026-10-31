@@ -34,25 +34,117 @@ encoded back (section 5.0).
 Success is now: Lean theorems, checked by Lean, about a few interesting
 functions of BL31, stated about the code as it is in the object files that
 the BL31 build produced, and proven with instruction beacons (section 1.3).
-"Interesting" means the TRDC functions (the Trusted Resource Domain
-Controller, which the i.MX 93 uses to restrict which bus masters may access
-which memory and peripherals), plus functions that exercise features that a
-proof about real firmware needs. Section 1.2 lists candidates.
+For the first milestone, these are platform-independent functions that
+exercise features a proof about real firmware needs: loops, memory
+buffers, calls between object files, tail calls, function pointers
+(section 1.2.1). The TRDC functions (the Trusted Resource Domain Controller,
+which the i.MX 93 uses to restrict which bus masters may access which memory
+and peripherals) are the eventual goal, but need a TRDC semantics combined
+with Kraken's ISA semantics, planned via Sockeye's Lean backend
+(section 1.2.2).
 
-Each theorem says what the function does to registers, memory and device
-registers, under which preconditions, and that it returns to its caller.
+Each theorem says what the function does to registers and memory, under
+which preconditions, and that it returns to its caller.
 What the trusted base of such a theorem is (objdump, the converter of
 section 4.5, Kraken's semantics) is stated next to it.
 
 ### 1.2 Candidate functions
 
-Sizes are from `bl31.elf`; each function is in its own section in its object
-file (`-ffunction-sections`). The features that a function exercises are
-what makes it interesting beyond its size.
+Each function is in its own section in its object file
+(`-ffunction-sections`). Sizes are from the object files. The features that
+a function exercises are what makes it interesting beyond its size.
 
-TRDC functions, from `drivers/nxp/trdc/imx_trdc.c` (`imx_trdc.o`) and
-`plat/imx/imx93/trdc.c` (`trdc.o`), roughly in the order in which they could
-be done:
+#### 1.2.1 First milestone: platform-independent functions
+
+Verifying the TRDC functions (section 1.2.2) needs a semantics of the TRDC,
+combined with Kraken's ISA semantics. That is planned via Sockeye's Lean
+backend, but too big for a first milestone. So the first milestone takes
+functions that access no device registers and no system registers, and
+contain none of the instructions that Kraken lacks (section 4.4). This was
+checked by listing the mnemonics of each function in `objdump -d` of its
+object file. Their specs only talk about registers and ordinary memory,
+which Kraken's semantics already covers.
+
+The C library that TF-A brings along (`lib/libc`, built into
+`build/imx93/release/libc/*.o`) is the richest source. Not all of it is
+linked into `bl31.elf`, but all of it is in object files, which is what is
+verified.
+
+Leaf functions with loops over memory, whose specs relate memory to Lean
+functions on `List UInt8`:
+
+- `strlen` (28 bytes, 8 instructions): the simplest loop; precondition: a
+  NUL-terminated string in memory.
+- `strnlen`, `memchr`, `strchr` (36, 44, 36 bytes), `memrchr` (56),
+  `strrchr` (40, uses `csel`): read-only searches.
+- `memcmp`, `strcmp`, `strncmp` (52, 44, 56 bytes): two buffers, a signed
+  result.
+- `memcpy` (32 bytes): a byte copy loop; separation logic for two disjoint
+  buffers.
+- `memset` (104 bytes): aligns, then stores whole words whose value is the
+  byte replicated by a `mul`, then the tail; bit-level reasoning.
+- `strlcpy` (60 bytes), `strtok_r` (116 bytes): writes, and a pointer as
+  result (`strtok_r` also keeps state in memory between calls).
+- `swapfunc` (36 bytes, static, in `qsort.o`).
+
+Arithmetic:
+
+- `page_align` (28 bytes, `bl_common.o`), `plat_core_pos_by_mpidr` (28,
+  `csinv`), `imx_validate_ns_entrypoint` (20, a security check: rejects
+  non-secure entry points below `PLAT_NS_IMAGE_OFFSET`, `0x80200000`). The
+  last two are in platform files, but are pure computations.
+- `strtoul`, `strtol`, `strtoull`, `strtoll` (396 to 416 bytes): digit
+  parsing with overflow detection (`udiv`, `madd`, `umulh`); the spec
+  compares with a reference function in Lean.
+- `unsigned_num_print` (304 bytes, static, in `snprintf.o`): number to
+  digits with `udiv` and `msub`, into a buffer.
+
+Calls between object files (relocations `CALL26` and `JUMP26`), the first
+step towards composition (section 1.4):
+
+- `memmove` (52 bytes): copies backwards itself, and otherwise tail-calls
+  `memcpy` (`b memcpy`, a `JUMP26` relocation).
+- `memcpy_s` (136 bytes) calls `memcpy`; `strlcat` (136) calls `strlen`;
+  `strcpy_secure` (116) calls `strnlen_secure` (40).
+- `setjmp`, `longjmp` (40, 44 bytes, assembly): save and restore the
+  callee-saved registers and `sp`; `longjmp` returns to where `setjmp` was
+  called, so its spec is about control flow, not about a return.
+- Stretch: `qsort` (4 bytes) tail-calls `local_qsort` (796 bytes, static),
+  which is recursive and calls the comparison function through a function
+  pointer (`blr`), so its spec takes the comparison function's spec as a
+  parameter.
+- Stretch: `vsnprintf` (1,364 bytes): a `switch` compiled to a jump table
+  (`adr`, `br`), and variadic arguments (`va_list`).
+
+Data structures of TF-A that do not depend on the platform:
+
+- `psci_find_max_off_lvl` (76 bytes), `psci_find_target_suspend_lvl` (52),
+  in `psci_common.o`: small functions on PSCI's power state structures.
+- `find_xlat_table_entry` (148 bytes, static, `xlat_tables_utils.o`): walks
+  translation tables in memory; loads only.
+- `mmap_add_region_ctx` (548 bytes, `xlat_tables_core.o`): inserts a region
+  into the sorted memory map, rejecting overlaps; calls `memmove` and
+  `memcpy`. A security-relevant invariant (the map stays sorted and without
+  overlaps).
+- Stretch: `xlat_tables_map_region` (428 bytes): recursive; calls
+  `xlat_desc` (236 bytes), which calls `xlat_arch_get_pas` and
+  `xlat_arch_regime_get_xn_desc` (pure, a few instructions).
+
+Some of these call platform code on error paths only (`tf_log`,
+`console_flush`, `el3_panic`, `plat_panic_handler`). Their specs enter as
+hypotheses about undefined symbols, e.g. "does not return", or the
+precondition excludes the error; both fit the composition plan of
+section 1.4.
+
+Suggested order: `strlen`, `memcpy`, `memcmp`, `memset`, `memmove` (first
+call), `strlcat`, `setjmp`/`longjmp`, `strtoul`, `mmap_add_region_ctx`.
+
+#### 1.2.2 Later: TRDC functions
+
+These need a TRDC semantics combined with Kraken's ISA semantics (planned via
+Sockeye's Lean backend). From `drivers/nxp/trdc/imx_trdc.c` (`imx_trdc.o`)
+and `plat/imx/imx93/trdc.c` (`trdc.o`), roughly in the order in which they
+could be done:
 
 - `trdc_get_mbc_base` (static, 32 bytes): leaf; reads `TRDC_HWCFG0` (MMIO,
   `ldrh`); `csel`.
@@ -86,21 +178,21 @@ region descriptors are written by a firmware program; the spec of
 terms, which is the link from these proofs to the system-level properties of
 ToySys.
 
-Other functions that exercise further features:
+#### 1.2.3 Later: other platform-dependent functions
 
-- `imx_validate_ns_entrypoint` (20 bytes): security check: rejects non-secure
-  entry points below `PLAT_NS_IMAGE_OFFSET` (`0x80200000`); `csel`.
-- `plat_core_pos_by_mpidr` (28 bytes): pure bit manipulation, `csinv`.
+These exercise further features, but need device registers, system
+registers, or instructions without semantics, or call platform code on
+their main path:
+
 - `get_arm_std_svc_args` (12 bytes): returns the address of data in `.rodata`
   (`ADRP`/`ADD`).
-- `memcpy` (32 bytes): byte loop: loop invariant, separation logic for two
-  buffers.
-- `memset`, `memmove` (104, 52 bytes): alignment cases; overlapping buffers.
 - `console_lpuart_putc` (56 bytes): assembly (`.S`); MMIO polling loop on a
   status register, so termination depends on the device.
 - `psci_smc_handler` (332 bytes): `switch` compiled to a jump table (`ldrb` from
   `.rodata`, `adr`, `br x3`); many calls.
-- `udelay` (104 bytes): indirect calls through a function pointer in global data
+- `udelay` (104 bytes): platform-independent C, but calls the platform's
+  timer through a function pointer in global data, so its spec needs the
+  timer's spec; indirect calls through a function pointer in global data
   (`blr x0`); callee-saved registers `x19`-`x21`; `udiv`.
 - `psci_validate_power_state` and similar: tail call through a function pointer
   (`br x16`).
@@ -111,8 +203,7 @@ Other functions that exercise further features:
 - `flush_dcache_range` (56 bytes): `mrs ctr_el0`, `dc civac`, `dsb`: blocked as
   above.
 
-The functions marked "blocked" are listed because they are interesting, but
-the first milestone avoids them, since their instructions get no semantics
+The functions marked "blocked" contain instructions that get no semantics
 for now (section 4.4).
 
 ### 1.3 Proof style: instruction beacons
@@ -127,7 +218,7 @@ For object files, the natural form is the text that objdump prints, at the
 function's symbol plus the offset that objdump prints, e.g.
 
 ```lean
-  instr "ccmp w5, #0x7, #0x2, ne" at trdc_mrc_set_control + 0x18
+  instr "ldrb w1, [x4, #-1]!" at memmove + 0x28
 ```
 
 Kraken has no such tactic. Its `kstep` steps through straight-line code
@@ -173,12 +264,16 @@ Still needed:
 - Adding the missing instructions to Kraken's `Operation`, parser and
   printer without semantics (section 4.4). The first targets avoid them, but
   the files contain them, so the converter must accept them.
-- An ELF container parser for object files (section 3), because the proofs
-  need what `objdump -d` does not give (section 4.5): the contents of data
-  sections (`fuse_data`, `trdc_mgr_blks`, the TRDC configuration tables),
-  relocations in data sections (`R_AARCH64_ABS64` in
-  `.data.trdc_cfg_info`), and the symbol table. Executables (`bl31.elf`) and
-  segments can wait until the composition step.
+- An ELF container parser for object files (section 3), because some
+  proofs need what `objdump -d` does not give (section 4.5): the contents of
+  data sections, relocations in data sections, and the symbol table. Most
+  first-milestone targets (section 1.2.1) get by without it, since they
+  only access memory passed in by pointer; the first that needs it is
+  `vsnprintf`, whose jump table is in `.rodata.vsnprintf`. The TRDC
+  functions need it for `fuse_data`, `trdc_mgr_blks` and the configuration
+  tables (with `R_AARCH64_ABS64` relocations in `.data.trdc_cfg_info`).
+  Executables (`bl31.elf`) and segments can wait until the composition
+  step.
 - The mapping-symbol background (section 2.1) stays as an explanation of
   why objdump can tell code from data; the converter itself does not need
   them.
@@ -186,13 +281,14 @@ Still needed:
 New, and not in Kraken yet:
 
 - Instruction beacons (section 1.3).
-- MMIO with a device model. Every TRDC function accesses device registers.
+- Later, for the TRDC functions (not the first milestone): MMIO with a
+  device model. Every TRDC function accesses device registers.
   Kraken's AArch64 semantics has `nonmem_load` and `nonmem_store` effects,
   but its `Effects.All` maps them to `False`, so no MMIO access can be
   verified yet. Kraken's x86-64 side has an example with a device state
   (`Kraken/X64/Examples/IncrementMMIO.lean`), and ToySys has a `Platform`
   with `read` and `write` relations; one of these designs has to come to
-  AArch64.
+  AArch64, with the device semantics generated by Sockeye's Lean backend.
 - Calls: specs of callees as hypotheses, the link register, callee-saved
   registers and the stack frame. Kraken's AArch64 examples on `main` have no
   calls; the `vcgen` branch (Sebastian Graf's, not merged) has
@@ -958,8 +1054,11 @@ on the BL31 build directory.
 ## 6. Decisions so far
 
 - Goal: proofs about functions in AArch64 object files, composable under
-  linking later. Success: a few interesting BL31 functions verified,
-  especially TRDC ones (section 1.1, candidates in 1.2).
+  linking later. Success: a few interesting BL31 functions verified
+  (section 1.1). The first milestone takes platform-independent functions,
+  mostly from TF-A's `libc` (section 1.2.1); the TRDC functions come later,
+  once a TRDC semantics from Sockeye's Lean backend can be combined with
+  Kraken's (section 1.2.2).
 - Proofs use instruction beacons, `instr "<objdump text>" at sym + off`,
   ported from ToySys to Kraken (section 1.3).
 - Instructions come from `objdump -d -r` through Kraken's assembly parser
@@ -996,13 +1095,13 @@ on the BL31 build directory.
 ## 7. Next steps
 
 1. Add the missing instructions to Kraken's `Operation` and parser, without
-   semantics (section 4.4).
-2. Write the objdump-to-Kraken converter for `imx_trdc.o` (section 4.5).
+   semantics (section 4.4), so that the converter accepts every object file.
+2. Write the objdump-to-Kraken converter, starting with `libc/strlen.o`
+   (section 4.5).
 3. Port the `instr _ at _` beacon tactic from ToySys to Kraken (section 1.3).
-4. Verify `trdc_get_mbc_base`, which needs an MMIO read, so decide how MMIO
-   and device state are modelled in Kraken's AArch64 semantics first
-   (section 1.5).
-5. Calls: verify `trdc_mrc_set_control` using the spec of
-   `trdc_get_mrc_base`.
-6. The ELF container parser for object files, for data sections
-   (`trdc_fuse_read`).
+4. Verify `strlen`, then `memcpy`, `memcmp` and `memset` (section 1.2.1).
+5. Calls: verify `memmove`, whose tail call to `memcpy` uses `memcpy`'s
+   spec, then `strlcat`.
+6. The ELF container parser for object files, when a target needs data
+   sections or the symbol table beyond what objdump prints (first:
+   `vsnprintf`'s jump table in `.rodata`).
