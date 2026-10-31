@@ -45,12 +45,25 @@ Observations from `readelf` that matter for the design:
 - TF-A compiles with `-ffunction-sections -fdata-sections`, so each function
   is its own section (`.text.bl31_main`) with its own relocation section
   (`.rela.text.bl31_main`). This makes a section a natural unit of code.
-- Relocations seen in `bl31_main.o`: `R_AARCH64_ADR_PREL_PG_HI21` (ADRP),
-  `R_AARCH64_ADD_ABS_LO12_NC` (ADD of the low 12 bits), `R_AARCH64_CALL26`
-  (BL), `R_AARCH64_JUMP26` (B). Kraken's `ConstExpr` already has `label`,
-  `pg_hi21`, `lo12`, `add` and `int64`, so an instruction plus its relocation
-  can become an `Operation` whose operand is e.g.
-  `.pg_hi21 (.add (.label "sym") (.int64 addend))`.
+- Relocations seen in `bl31_main.o`, where S is the symbol's address, A the
+  addend and P the address of the instruction being patched:
+  - `R_AARCH64_ADR_PREL_PG_HI21`, for ADRP: the 21-bit immediate becomes
+    `Page(S + A) - Page(P)` in units of 4 KiB pages, where `Page(x)` clears
+    the low 12 bits. "PREL" means PC-relative, "PG" page, "HI21" the high 21
+    bits of the page offset (giving a range of ±4 GiB).
+  - `R_AARCH64_ADD_ABS_LO12_NC`, for the ADD that follows such an ADRP: the
+    12-bit immediate becomes the low 12 bits of `S + A`, i.e. the offset
+    within the page. "ABS" means absolute (not PC-relative), "NC" no
+    overflow check, since the higher bits are dropped on purpose.
+  - `R_AARCH64_CALL26`, for BL, and `R_AARCH64_JUMP26`, for B: the 26-bit
+    immediate becomes `(S + A - P) / 4`, a PC-relative branch of ±128 MiB.
+    The two differ only in that a linker may insert a veneer for BL that
+    clobbers x16/x17.
+
+  So an ADRP/ADD pair materializes the address of `S + A`. Kraken's
+  `ConstExpr` already has `label`, `pg_hi21`, `lo12`, `add` and `int64`, so
+  an instruction plus its relocation can become an `Operation` whose operand
+  is e.g. `.pg_hi21 (.add (.label "sym") (.int64 addend))`.
 - The toolchain emits the AArch64 mapping symbols `$x` (code starts here) and
   `$d` (data starts here); `bl31.elf` has 472 of them. They tell code apart
   from literal pools and other data in executable sections. Without them,
@@ -63,6 +76,7 @@ Observations from `readelf` that matter for the design:
   `stlr`, `stlrb`, `ldarb`. Roughly 4% of the code; the rest are
   integer, load/store and branch instructions that Kraken has (`objdump`
   prints aliases such as `mov`, `cmp`, `tst`, `lsl`, `ubfx`, `cset`).
+  How they are handled is decided in section 4.4.
 
 ## 3. Lean datatype for an ELF file (first sketch)
 
@@ -296,7 +310,7 @@ the decoder is currently the slow part.
    with the encodings taken from `sail-arm` (patterns and field slices in
    the `__DecodeA64_*` clauses, conditions in the `decode_*` functions).
    Kraken's `Operation` set is small (about 100 constructors), so this is a
-   bounded amount of code.
+   bounded amount of code. **Chosen**, see below.
 2. A code generator that extracts the patterns and field slices from the
    `sail-arm` sources (or Sail's JSON/IR output) and emits the Lean pattern
    matching; the mapping from fields to Kraken operands would still be
@@ -316,6 +330,42 @@ Other Lean work to look at: LNSym (github.com/leanprover/LNSym), a
 symbolic simulator for Armv8 machine code in Lean, which has its own
 decoder; its coverage and license are not checked yet.
 
+Decision: option 1. The decoder is agent-written Lean that maps bit patterns
+to Kraken `Operation`s, and the encodings (bit patterns, field positions,
+conditions under which an encoding is undefined, and the order of
+overlapping encodings) are taken from `sail-arm`'s `arm-v9.4-a` sources.
+Each decoder case should name the `sail-arm` clause it follows, so that it
+can be reviewed against it. Option 2 does not save much, since the mapping to
+Kraken's operands cannot be produced by a code generator anyway, and option
+3 does not produce decoded instructions.
+
+### 4.4 Instructions that Kraken does not have yet
+
+Decision: the instructions missing from Kraken's `Operation` (section 2:
+`mrs`, `msr`, `isb`, `dsb`, `dc`, `tlbi`, `eret`, `wfi`, `wfe`, `sev`,
+`sevl`, `udf`, and the exclusive and acquire/release loads and stores) are
+added as new constructors of Kraken's `AArch64.Operation`, without
+semantics. Semantics need a human review, for which there is no time now.
+
+Until they get semantics, executing one of them yields Kraken's existing
+`Effects.unimplemented (msg : String)`, which Kraken's AArch64 semantics
+already returns for e.g. execution reaching a data block. In
+`Kraken/AArch64/OmniSemantics.lean`, its weakest precondition is `False`, so
+proofs about code paths that reach such an instruction get stuck there
+instead of proving anything wrong, while code that does not reach it can
+still be verified. No new `Effects` constructor is needed.
+
+Since the new constructors are part of `Operation`, Kraken's printer and
+its assembly parser have to handle them too; the objdump-based testing above
+needs at least the parser. Kraken's fuzzer derives its instruction
+generator from all constructors of `Operation` (`gen_ctors% Operation` in
+`KrakenRunnerAArch64.lean`) and compares Kraken's results with real
+execution, so it has to skip the constructors without semantics.
+
+The `undecoded` code item (section 3) remains for words the decoder does not
+recognize at all, e.g. SIMD and floating-point instructions, which do not
+occur in BL31.
+
 ## 5. Decisions so far
 
 - Parse ELF64 little-endian AArch64 only.
@@ -325,6 +375,10 @@ decoder; its coverage and license are not checked yet.
 - Express relocated operands with Kraken's `ConstExpr` (`label`, `pg_hi21`,
   `lo12`, `add`).
 - Words the decoder does not support are kept as `undecoded`, not rejected.
+- The decoder is agent-written Lean with encodings from `sail-arm`
+  (section 4.3).
+- Instructions missing from Kraken are added to Kraken's `Operation` without
+  semantics; executing them yields `Effects.unimplemented` (section 4.4).
 
 ## 6. Next steps
 
