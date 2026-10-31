@@ -203,6 +203,38 @@ Open points:
   `BitVec 64` is what Kraken's semantics uses.
 - Static archives (`libc.a`) could later be read as a list of object files.
 
+### 3.1 Why section contents stay bytes in the container layer
+
+An alternative is a single datatype whose executable sections hold decoded
+instructions instead of bytes. Reasons for keeping bytes in the container
+layer and computing the decoded view from them:
+
+- Code and data are not always distinguishable. The `$x`/`$d` mapping
+  symbols exist in object files and in unstripped executables, but a
+  stripped executable has no symbols at all (checked: `strip` on
+  `bl31.elf` leaves no symbol table). Literal pools, jump tables and strings
+  inside executable sections (`bl31.elf`'s `.ro` section contains strings)
+  then have to be bytes anyway.
+- The ELF round trip of section 5 would depend on an exact instruction
+  round trip (section 5.5): every word would have to be decoded and encoded
+  back bit for bit, including encodings that Kraken's `Operation` does not
+  distinguish. Every gap in the decoder would break the ELF tests, which
+  could otherwise be finished before the decoder.
+- The container layer does not depend on the architecture. Kraken also has
+  an x86-64 backend, and the same container parser and encoder could serve
+  it, with only the code layer being specific to AArch64.
+- Proofs can refer to the actual file: a statement like "the bytes at this
+  offset decode to this `Operation`" keeps the decoder visible as a function
+  that is part of the trusted base, instead of hiding it inside the parser.
+
+The decoded view should still be as convenient as a decoded datatype. One
+way is to make the container parametric in the section contents, e.g.
+`File (Contents : Type)`, with `parse : ByteArray -> Except String (File
+ByteArray)` and a `File.map` that turns `File ByteArray` into `File
+CodeSection` for executable sections. Encoding a `File CodeSection` back
+into bytes would need the instruction encoder of section 5.5, and is not
+planned.
+
 ## 4. Where instruction decoding information comes from
 
 ### 4.1 Sail's Arm model
@@ -467,9 +499,9 @@ The parser always fills in `layout`. Then both properties can be tested:
 ### 5.4 The test
 
 - The ELF parser, the encoder and the test live in Kraken.
-- The test checks the round trip on every object file that it finds in a
-  given directory, recursively. (Suggestion: also every `*.elf` file, so that
-  executables such as `bl31.elf` are covered.)
+- The test checks the round trip on every object file (`*.o`) and every
+  executable (`*.elf`, e.g. `bl31.elf`) that it finds in a given directory,
+  recursively.
 - Kraken's own test suite runs it on a directory with a few small object
   files committed to Kraken, chosen especially among those that made the test
   fail at some point during development. TF-A is BSD-3-Clause, so they can be
@@ -496,11 +528,75 @@ catch, but needs no external tool. Expected obstacles:
 
 Not planned for now; the ELF round trip does not depend on it.
 
+### 5.6 A third test: compare a pretty-printer with GNU objdump
+
+`prettyPrint (parse file) = objdump file`: a Lean pretty-printer that
+reproduces the text of GNU `objdump` (from the Arm GNU Toolchain, open
+source). Unlike the round trips, this compares with an independent
+implementation, so it catches a parser or decoder that misinterprets
+something, including errors that an encoder with the mirror-image error
+would hide (section 5.1). It is the only one of the three tests that checks
+the decoder.
+
+`objdump -d -r` on `bl31_main.o` prints e.g.:
+
+```
+Disassembly of section .text.get_arm_std_svc_args:
+
+0000000000000000 <get_arm_std_svc_args>:
+   0:	90000000 	adrp	x0, 0 <get_arm_std_svc_args>
+			0: R_AARCH64_ADR_PREL_PG_HI21	.rodata.psci_args.0
+   4:	91000000 	add	x0, x0, #0x0
+			4: R_AARCH64_ADD_ABS_LO12_NC	.rodata.psci_args.0
+   8:	d65f03c0 	ret
+```
+
+What the printer would have to reproduce, and what that costs:
+
+- Aliases: objdump prints `mov x29, sp` for `add x29, sp, #0`, `cmp` for
+  `subs xzr, ...`, `lsl` for `ubfm`, `cset` for `csinc`, and so on, following
+  the "preferred disassembly" conditions of the Arm architecture. Kraken's
+  printer prints the base instruction. The objdump-compatible printer needs
+  these conditions for every alias. `sail-arm` does not contain them, since
+  they are not part of the ASL pseudocode, so they would have to come from
+  Arm's documentation or from binutils.
+- Operands as objdump shows them: hexadecimal immediates (`#0x0`), branch
+  targets as the unrelocated address followed by the nearest symbol
+  (`0 <get_arm_std_svc_args>`), and comments such as `// #42`. In object
+  files, the relocated operands are printed with their unrelocated values,
+  so the printer must print the word's field, not Kraken's `ConstExpr`; the
+  relocation appears on a separate line.
+- Words that the decoder does not support yet: objdump disassembles them
+  (e.g. SIMD), the printer cannot, so the test needs an exception, e.g.
+  skipping lines whose word is `undecoded`.
+- The exact text depends on the binutils version (here 2.44 in Arm GNU
+  Toolchain 14.3.Rel1), so the expected output has to be produced with a
+  fixed version.
+
+A cheaper variant compares per instruction instead of per text: Kraken's
+assembly parser reads objdump's text of each instruction, and the result
+must equal the decoded `Operation` (section 4.3). Aliases and number
+formats then do not matter, since Kraken's parser already accepts them
+(`mov`, `cmp`, `lsl`, `cset`, `tst`, `ubfx`, `mul`, `neg`, ...); only
+objdump's additions have to be removed first (the `<symbol>` after a branch
+target, `//` comments), and branch targets have to be compared as offsets.
+But it does not test the container layer's output (section and symbol names,
+relocation lines). For the container layer, `readelf -h -S -s -r -W` is the
+better oracle than objdump: it prints all header fields, sections, symbols
+and relocations, and a printer for those is simple.
+
+For Kraken's test suite, the expected `objdump`/`readelf` output of the
+committed object files is committed next to them, so that the test does not
+need the cross toolchain. During development, the same test runs the tools
+on the BL31 build directory.
+
 ## 6. Decisions so far
 
 - Parse ELF64 little-endian AArch64 only.
 - Two layers: a container layer that mirrors the file, and a code layer that
   decodes executable sections into Kraken instructions.
+- Section contents stay bytes in the container layer; decoded instructions
+  are a view computed from them (section 3.1).
 - Use the `$x`/`$d` mapping symbols to separate code from data.
 - Express relocated operands with Kraken's `ConstExpr` (`label`, `pg_hi21`,
   `lo12`, `add`).
@@ -510,7 +606,7 @@ Not planned for now; the ELF round trip does not depend on it.
 - Instructions missing from Kraken are added to Kraken's `Operation` without
   semantics; executing them yields `Effects.unimplemented` (section 4.4).
 - An ELF encoder is written too. A Kraken test checks the round trip on all
-  object files in a directory, recursively; Kraken's test suite runs it on a
+  object files and executables in a directory, recursively; Kraken's test suite runs it on a
   few committed object files, and during development it runs on the BL31
   build directory (section 5.4).
 - The layout details needed for byte equality are kept in a separate
