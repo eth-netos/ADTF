@@ -24,24 +24,19 @@ they are not needed here).
 
 ### 1.1 Definition of success
 
-Earlier, the plan measured progress by round-trip properties of an ELF
-parser and encoder (section 5). These are tests of a tool, not the goal:
-they say that a file was read correctly, not that anything about its code
-was proven. They also make less sense once instructions come from objdump
-(section 4.5), since there is no Lean decoder whose output could be
-encoded back (section 5.0).
+Tests of the parsers (section 5) are not the goal: they say that a file
+was read correctly, not that anything about its code was proven.
 
 Success is now: Lean theorems, checked by Lean, about a few interesting
 functions of BL31, stated about the code as it is in the object files that
 the BL31 build produced, and proven with instruction beacons (section 1.3).
-For the first milestone, these are platform-independent functions that
-exercise features a proof about real firmware needs: loops, memory
-buffers, calls between object files, tail calls, function pointers
-(section 1.2.1). The TRDC functions (the Trusted Resource Domain Controller,
-which the i.MX 93 uses to restrict which bus masters may access which memory
-and peripherals) are the eventual goal, but need a TRDC semantics combined
-with Kraken's ISA semantics, planned via Sockeye's Lean backend
-(section 1.2.2).
+For the first milestone, these are platform-independent functions that make
+no calls, and exercise loops, memory buffers, bit manipulation and data
+structures (section 1.2.1). Calls come next (section 1.2.2). The TRDC
+functions (the Trusted Resource Domain Controller, which the i.MX 93 uses to
+restrict which bus masters may access which memory and peripherals) are the
+eventual goal, but need a TRDC semantics combined with Kraken's ISA
+semantics, planned via Sockeye's Lean backend (section 1.2.3).
 
 Each theorem says what the function does to registers and memory, under
 which preconditions, and that it returns to its caller.
@@ -54,81 +49,124 @@ Each function is in its own section in its object file
 (`-ffunction-sections`). Sizes are from the object files. The features that
 a function exercises are what makes it interesting beyond its size.
 
-#### 1.2.1 First milestone: platform-independent functions
+#### 1.2.1 First milestone: platform-independent functions without calls
 
-Verifying the TRDC functions (section 1.2.2) needs a semantics of the TRDC,
+Verifying the TRDC functions (section 1.2.3) needs a semantics of the TRDC,
 combined with Kraken's ISA semantics. That is planned via Sockeye's Lean
-backend, but too big for a first milestone. So the first milestone takes
-functions that access no device registers and no system registers, and
-contain none of the instructions that Kraken lacks (section 4.4). This was
-checked by listing the mnemonics of each function in `objdump -d` of its
-object file. Their specs only talk about registers and ordinary memory,
-which Kraken's semantics already covers.
+backend, but too big for a first milestone. Calls are left for later too
+(section 1.2.2). So the first milestone takes functions that
 
-The C library that TF-A brings along (`lib/libc`, built into
-`build/imx93/release/libc/*.o`) is the richest source. Not all of it is
-linked into `bl31.elf`, but all of it is in object files, which is what is
-verified.
+- make no calls: no `bl`, `blr`, `br`, and no `b` to another function (a
+  tail call), i.e. no `CALL26` or `JUMP26` relocation;
+- access no device registers and no system registers, and contain none of
+  the instructions that Kraken lacks (section 4.4);
+- come from code that is not specific to a platform (`lib/`, `common/`,
+  `bl31/`, `plat/common/`, `drivers/console/`), plus two pure functions from
+  the i.MX 93 platform code.
 
-Leaf functions with loops over memory, whose specs relate memory to Lean
-functions on `List UInt8`:
+The list below was produced by classifying every function in the 114 object
+files by the mnemonics and relocations in `objdump -d -r`: of 698 function
+symbols (assembly files' local labels included), 366 make calls, 87
+contain an instruction that Kraken lacks, 7 branch through a register, and
+238 are leaves, most of them in platform code or drivers that access device
+registers (GIC, TRDC, DDR, LPUART). Sizes are in instructions. Their specs
+only talk about registers and memory, which Kraken's semantics covers; some
+read or write global variables, whose addresses are symbols (`Labels`).
 
-- `strlen` (28 bytes, 8 instructions): the simplest loop; precondition: a
-  NUL-terminated string in memory.
-- `strnlen`, `memchr`, `strchr` (36, 44, 36 bytes), `memrchr` (56),
-  `strrchr` (40, uses `csel`): read-only searches.
-- `memcmp`, `strcmp`, `strncmp` (52, 44, 56 bytes): two buffers, a signed
-  result.
-- `memcpy` (32 bytes): a byte copy loop; separation logic for two disjoint
-  buffers.
-- `memset` (104 bytes): aligns, then stores whole words whose value is the
-  byte replicated by a `mul`, then the tail; bit-level reasoning.
-- `strlcpy` (60 bytes), `strtok_r` (116 bytes): writes, and a pointer as
-  result (`strtok_r` also keeps state in memory between calls).
-- `swapfunc` (36 bytes, static, in `qsort.o`).
+TF-A's C library (`lib/libc`, built into `build/imx93/release/libc/*.o`;
+not all of it is linked into `bl31.elf`, but all of it is in object files):
 
-Arithmetic:
-
-- `page_align` (28 bytes, `bl_common.o`), `plat_core_pos_by_mpidr` (28,
-  `csinv`), `imx_validate_ns_entrypoint` (20, a security check: rejects
-  non-secure entry points below `PLAT_NS_IMAGE_OFFSET`, `0x80200000`). The
-  last two are in platform files, but are pure computations.
-- `strtoul`, `strtol`, `strtoull`, `strtoll` (396 to 416 bytes): digit
+- `strlen` (7): the simplest loop; precondition: a NUL-terminated string.
+- Read-only searches: `strnlen` (9), `strnlen_secure` (10), `memchr` (11),
+  `strchr` (9), `strrchr` (10, `csel`), `memrchr` (14).
+- Comparisons of two buffers, signed result: `memcmp` (13), `strcmp` (11),
+  `strncmp` (14).
+- `memcpy` (8): byte copy loop; two disjoint buffers.
+- `memset` (26): aligns, then stores whole words whose value is the byte
+  replicated by a `mul`, then the tail; bit-level reasoning.
+- `strlcpy` (15), `strtok_r` (29): writes, and a pointer as result
+  (`strtok_r` keeps its position in memory between calls).
+- `swapfunc` (9, static, in `qsort.o`).
+- `strtoul` (99), `strtol` (101), `strtoull` (104), `strtoll` (101): digit
   parsing with overflow detection (`udiv`, `madd`, `umulh`); the spec
   compares with a reference function in Lean.
-- `unsigned_num_print` (304 bytes, static, in `snprintf.o`): number to
-  digits with `udiv` and `msub`, into a buffer.
+- `unsigned_num_print` (76, static, in `snprintf.o`): number to digits with
+  `udiv` and `msub`, into a buffer.
+- `atexit` (11): stores a function pointer in a global variable.
+- `setjmp` (10), `longjmp` (11), assembly: save and restore the
+  callee-saved registers and `sp`. `longjmp` does not return to its caller
+  but to where `setjmp` was called, so its spec is about control flow.
+
+Other libraries (`lib/`):
+
+- `__popcountsi2` (12), `__popcountdi2` (14), from `lib/compiler-rt`:
+  population count with the usual bit tricks; the spec is a one-liner, the
+  proof is bit-vector reasoning.
+- `memcpy16` (12, assembly, `lib/aarch64/misc_helpers.S`): copies 16 bytes
+  at a time with post-indexed `ldp`/`stp`, then bytes.
+- `fixup_gdt_reloc` (46, assembly, same file): applies the dynamic
+  relocations of a position-independent image to its global offset table;
+  a loop over memory that itself does relocation processing.
+- `per_cpu_base` (7, assembly, `lib/per_cpu`): address arithmetic on the
+  linker symbols `__PER_CPU_START__` and `__PER_CPU_UNIT_END__`.
+- PSCI (`lib/psci`): `psci_version` (2), `psci_find_target_suspend_lvl`
+  (13), `psci_find_max_off_lvl` (19), `psci_set_req_local_pwr_state` (17),
+  `psci_init_req_local_pwr_states` (20), `psci_register_spd_pm_hook` (23),
+  `psci_features` (27): small functions on PSCI's power state arrays and
+  its table of supported functions.
+- Translation tables (`lib/xlat_tables_v2`): `find_xlat_table_entry` (37,
+  static): walks translation tables in memory, loads only;
+  `tcr_physical_addr_size_bits` (19), `xlat_arch_get_pas` (5),
+  `xlat_arch_regime_get_xn_desc` (5): pure bit computations.
+
+Generic TF-A code (`common/`, `bl31/`, `plat/common/`, `drivers/console/`):
+
+- `page_align` (7), `get_version` (5), `tf_log_set_max_level` (7),
+  `get_bl_params_node_index` (24), `get_bl_load_info_from_mem_params_desc`
+  (30).
+- `get_arm_std_svc_args` (5): returns the address of data in `.rodata`
+  (`ADRP`/`ADD` relocations); `get_scr_el3_from_routing_model` (13): table
+  lookup; `bl31_set_next_image_type` (5), `bl31_register_bl32_init` (5):
+  store into globals.
+- `plat_ic_is_sgi` (3), `plat_ic_is_ppi` (4), `plat_ic_is_spi` (4): range
+  checks on interrupt numbers; `get_el_str` (10), `plat_log_get_prefix`
+  (14), `plat_get_target_pwr_state` (10).
+- `console_is_registered` (13), `console_unregister` (18),
+  `console_switch_state` (5), `console_set_scope` (6): the generic console
+  framework's linked list of consoles; `console_unregister` removes a node,
+  a classic separation logic proof.
+
+Pure functions from the i.MX 93 platform code:
+
+- `plat_core_pos_by_mpidr` (7, `csinv`) and `imx_validate_ns_entrypoint`
+  (5, a security check: rejects non-secure entry points below
+  `PLAT_NS_IMAGE_OFFSET`, `0x80200000`).
+
+Suggested order, each adding one thing: `imx_validate_ns_entrypoint`
+(straight-line code, a condition), `strlen` (a loop), `memcpy` (writes,
+two buffers), `memcmp` (two buffers read), `__popcountdi2` (bit-vector
+reasoning), `memset` (alignment, words), `console_unregister` (a linked
+data structure), `strtoul` (arithmetic with overflow), `setjmp`/`longjmp`
+(non-local control flow).
+
+#### 1.2.2 Later: platform-independent functions with calls
 
 Calls between object files (relocations `CALL26` and `JUMP26`), the first
 step towards composition (section 1.4):
 
-- `memmove` (52 bytes): copies backwards itself, and otherwise tail-calls
-  `memcpy` (`b memcpy`, a `JUMP26` relocation).
-- `memcpy_s` (136 bytes) calls `memcpy`; `strlcat` (136) calls `strlen`;
-  `strcpy_secure` (116) calls `strnlen_secure` (40).
-- `setjmp`, `longjmp` (40, 44 bytes, assembly): save and restore the
-  callee-saved registers and `sp`; `longjmp` returns to where `setjmp` was
-  called, so its spec is about control flow, not about a return.
-- Stretch: `qsort` (4 bytes) tail-calls `local_qsort` (796 bytes, static),
-  which is recursive and calls the comparison function through a function
-  pointer (`blr`), so its spec takes the comparison function's spec as a
-  parameter.
-- Stretch: `vsnprintf` (1,364 bytes): a `switch` compiled to a jump table
-  (`adr`, `br`), and variadic arguments (`va_list`).
-
-Data structures of TF-A that do not depend on the platform:
-
-- `psci_find_max_off_lvl` (76 bytes), `psci_find_target_suspend_lvl` (52),
-  in `psci_common.o`: small functions on PSCI's power state structures.
-- `find_xlat_table_entry` (148 bytes, static, `xlat_tables_utils.o`): walks
-  translation tables in memory; loads only.
-- `mmap_add_region_ctx` (548 bytes, `xlat_tables_core.o`): inserts a region
-  into the sorted memory map, rejecting overlaps; calls `memmove` and
-  `memcpy`. A security-relevant invariant (the map stays sorted and without
-  overlaps).
-- Stretch: `xlat_tables_map_region` (428 bytes): recursive; calls
-  `xlat_desc` (236 bytes), which calls `xlat_arch_get_pas` and
-  `xlat_arch_regime_get_xn_desc` (pure, a few instructions).
+- `memmove` (13 instructions): copies backwards itself, and otherwise
+  tail-calls `memcpy` (`b memcpy`, a `JUMP26` relocation).
+- `memcpy_s` calls `memcpy`; `strlcat` calls `strlen`; `strcpy_secure`
+  calls `strnlen_secure`.
+- `qsort` tail-calls `local_qsort` (static), which is recursive and calls
+  the comparison function through a function pointer (`blr`), so its spec
+  takes the comparison function's spec as a parameter.
+- `vsnprintf`: a `switch` compiled to a jump table (`adr`, `br`), and
+  variadic arguments (`va_list`).
+- `mmap_add_region_ctx` (`xlat_tables_core.o`): inserts a region into the
+  sorted memory map, rejecting overlaps; calls `memmove` and `memcpy`. A
+  security-relevant invariant (the map stays sorted and without overlaps).
+- `xlat_tables_map_region`: recursive; calls `xlat_desc`.
 
 Some of these call platform code on error paths only (`tf_log`,
 `console_flush`, `el3_panic`, `plat_panic_handler`). Their specs enter as
@@ -136,10 +174,7 @@ hypotheses about undefined symbols, e.g. "does not return", or the
 precondition excludes the error; both fit the composition plan of
 section 1.4.
 
-Suggested order: `strlen`, `memcpy`, `memcmp`, `memset`, `memmove` (first
-call), `strlcat`, `setjmp`/`longjmp`, `strtoul`, `mmap_add_region_ctx`.
-
-#### 1.2.2 Later: TRDC functions
+#### 1.2.3 Later: TRDC functions
 
 These need a TRDC semantics combined with Kraken's ISA semantics (planned via
 Sockeye's Lean backend). From `drivers/nxp/trdc/imx_trdc.c` (`imx_trdc.o`)
@@ -178,7 +213,7 @@ region descriptors are written by a firmware program; the spec of
 terms, which is the link from these proofs to the system-level properties of
 ToySys.
 
-#### 1.2.3 Later: other platform-dependent functions
+#### 1.2.4 Later: other platform-dependent functions
 
 These exercise further features, but need device registers, system
 registers, or instructions without semantics, or call platform code on
@@ -247,8 +282,7 @@ What a proof about one object file can assume, so that proofs compose:
 - What the linker does has to be stated as facts about the linked file:
   each section's bytes end up at its address, with the relocated fields
   filled in. Checking this for `bl31.elf` needs the ELF container parser for
-  executables (sections 3 and 5) and an instruction encoder or decoder for
-  the relocated fields.
+  executables (section 3), and objdump's view of the relocated fields.
 - Kraken's `NOTES.md` discusses why its layout-based semantics makes
   composition of programs hard, and plans to make the semantics depend only
   on the addresses of the current and the next instruction, which would help.
@@ -266,10 +300,11 @@ Still needed:
   the files contain them, so the converter must accept them.
 - An ELF container parser for object files (section 3), because some
   proofs need what `objdump -d` does not give (section 4.5): the contents of
-  data sections, relocations in data sections, and the symbol table. Most
+  data sections, relocations in data sections, and the symbol table. The
   first-milestone targets (section 1.2.1) get by without it, since they
-  only access memory passed in by pointer; the first that needs it is
-  `vsnprintf`, whose jump table is in `.rodata.vsnprintf`. The TRDC
+  access memory passed in by pointer, or globals by their symbol, without
+  relying on initial contents; the first that needs it is `vsnprintf`
+  (section 1.2.2), whose jump table is in `.rodata.vsnprintf`. The TRDC
   functions need it for `fuse_data`, `trdc_mgr_blks` and the configuration
   tables (with `R_AARCH64_ABS64` relocations in `.data.trdc_cfg_info`).
   Executables (`bl31.elf`) and segments can wait until the composition
@@ -289,10 +324,11 @@ New, and not in Kraken yet:
   (`Kraken/X64/Examples/IncrementMMIO.lean`), and ToySys has a `Platform`
   with `read` and `write` relations; one of these designs has to come to
   AArch64, with the device semantics generated by Sockeye's Lean backend.
-- Calls: specs of callees as hypotheses, the link register, callee-saved
-  registers and the stack frame. Kraken's AArch64 examples on `main` have no
-  calls; the `vcgen` branch (Sebastian Graf's, not merged) has
-  frame-based specs and a call example for x86-64 only.
+- After the first milestone, calls: specs of callees as hypotheses, the
+  link register, callee-saved registers and the stack frame. Kraken's
+  AArch64 examples on `main` have no calls; the `vcgen` branch (Sebastian
+  Graf's, not merged) has frame-based specs and a call example for x86-64
+  only.
 - A way to state the initial contents of data sections in a precondition,
   from the parsed ELF file.
 
@@ -315,13 +351,12 @@ Can go away, or is postponed:
 
 - The Lean instruction decoder (sections 4.1 to 4.3): postponed. objdump
   takes its place. The `sail-arm` encodings are still the reference if a
-  Lean decoder or encoder is written later to take objdump out of the
-  trusted base (section 5.0).
-- The byte-exact ELF round trip and the `Layout` cruft (sections 5.1 to
-  5.4): postponed; comparing the parsed container with `readelf` output
-  tests the parser better (section 5.0).
-- The pretty-printer compared with objdump (section 5.6): dropped, since
-  objdump is now the source of the instructions, not an oracle.
+  Lean decoder is written later to take objdump out of the trusted base.
+- ELF and instruction encoders, round-trip tests, and the layout details
+  that byte-exact round trips need: removed; producing files is not a goal,
+  and comparing with `readelf` tests the parser better (section 5).
+- A pretty-printer compared with objdump: removed, since objdump is now the
+  source of the instructions, not an oracle.
 - The code-layer datatype `CodeItem`/`CodeSection` (section 3): replaced by
   one Kraken `Program` per section, as Kraken's parser produces it, plus the
   symbols of that section as labels.
@@ -557,7 +592,6 @@ structure CodeSection where
 
 Open points:
 
-- The sketch does not yet have the `Layout` field of section 5.3.
 - Whether a `CodeSection` can simply be turned into a Kraken `Program`
   (`instr`, `label` and `byteArray` directives) for each section, with
   Kraken's `Labels` class providing the symbol addresses that the linker
@@ -584,13 +618,11 @@ layer and computing the decoded view from them:
   sound way to fill itself: decoding everything turns data into wrong
   instructions. Even with mapping symbols, the data regions have to be
   bytes, so the datatype needs bytes in executable sections anyway.
-- The ELF round trip of section 5 would depend on an exact instruction
-  round trip (section 5.5): every word would have to be decoded and encoded
-  back bit for bit, including encodings that Kraken's `Operation` does not
-  distinguish. Every gap in the decoder would break the ELF tests, which
-  could otherwise be finished before the decoder.
+- The container parser and its tests (section 5) can be finished before,
+  and independently of, whatever turns instruction words into Kraken
+  instructions.
 - The container layer does not depend on the architecture. Kraken also has
-  an x86-64 backend, and the same container parser and encoder could serve
+  an x86-64 backend, and the same container parser could serve
   it, with only the code layer being specific to AArch64.
 - Proofs can refer to the actual file: a statement like "the bytes at this
   offset decode to this `Operation`" keeps the decoder visible as a function
@@ -600,9 +632,7 @@ The decoded view should still be as convenient as a decoded datatype. One
 way is to make the container parametric in the section contents, e.g.
 `File (Contents : Type)`, with `parse : ByteArray -> Except String (File
 ByteArray)` and a `File.map` that turns `File ByteArray` into `File
-CodeSection` for executable sections. Encoding a `File CodeSection` back
-into bytes would need the instruction encoder of section 5.5, and is not
-planned.
+CodeSection` for executable sections.
 
 ## 4. Where instruction decoding information comes from
 
@@ -835,236 +865,47 @@ which is more work and more fragile than parsing the ELF container directly.
 A hybrid is possible: parse the ELF container in Lean (section 3), and use
 the objdump route only for decoding instruction words until the Lean decoder
 exists. The objdump route then also serves as the oracle for testing the
-decoder (section 5.6).
+decoder (section 4.3).
 
-## 5. Round-trip testing
+## 5. Testing the parsers
 
-### 5.0 What round trips are still good for
+Producing ELF files or instruction words is not a goal, so there is no ELF
+encoder and no instruction encoder, and no round-trip test. The parts that
+the proofs rely on are tested against independent GNU binutils tools (open
+source, part of the Arm GNU Toolchain installed for section 2):
 
-Round trips test a parser against an encoder; they were never a proof about
-the code (section 1.1). With instructions coming from objdump (section 4.5):
+- The ELF container parser (section 3) against `readelf -h -S -s -r -W`,
+  which prints all header fields, sections, symbols and relocations. A
+  printer for the parsed value in that format is simple. Comparing with an
+  independent tool catches misinterpreted fields, e.g. the binding and type
+  in a symbol's `st_info` byte swapped, which a round trip with an encoder
+  that makes the mirror-image error would not catch.
+- The objdump-to-Kraken converter (section 4.5): every instruction line of
+  `objdump -d -r` of every object file must be converted and parsed by
+  Kraken's parser, or be an instruction that is known to be missing. This
+  measures coverage. Whether the parsed `Operation` means what objdump's
+  text means is part of the trusted base (Kraken's parser), not tested here.
 
-- There is no Lean decoder, so there is nothing for an instruction round
-  trip (section 5.5) to test in that form.
-- The ELF container parser is still written in Lean and still in the
-  trusted base, since data sections, data relocations and symbols come from
-  it. It needs a test, but a comparison with GNU `readelf` (section 5.6,
-  last paragraphs) is the better one, since it is independent and catches
-  errors that a parser and an encoder make in the same way (section 5.1).
-  The byte-exact round trip and the `Layout` it needs (sections 5.2 and 5.3)
-  are postponed.
-- One round trip becomes more useful than before: checking objdump's output
-  against the bytes. With a Lean instruction encoder written from the
-  `sail-arm` encodings, `encodeInstr (parseAsm (objdump w)) = w` can be
-  checked for each instruction word of a verified function (relocated fields
-  as in the object file). If it holds, objdump and the converter drop out of
-  the trusted base: the theorem is then about the bytes, and only the Lean
-  encoder has to be trusted (or reviewed against `sail-arm`). This is
-  translation validation, and it is a later milestone.
-
-An ELF encoder for the container layer is feasible and small: the format is
-a fixed-size file header, two tables of fixed-size entries (program headers
-and section headers) and blobs of bytes at given offsets. Writing it is
-mostly the parser in reverse.
-
-The round trip is about the container layer only. Section contents,
-including the instruction words of `.text` sections, are kept as bytes, and
-the code layer of section 3 is a view computed from them that the encoder
-does not use. In object files these bytes hold the instructions as the
-assembler wrote them, with relocated fields still 0 (or the addend); the
-relocations are separate entries in `.rela.*` sections. So the ELF round trip
-needs no instruction encoder. An instruction encoder would only be needed to
-produce new code, e.g. to write out modified object files (section 5.5).
-
-### 5.1 Two possible properties
-
-1. `encode (parse file) = file`: byte equality with the original file.
-2. `parse (encode (parse file)) = parse file`: the encoder may lay the file
-   out differently, but the parser must read back the same value.
-
-Trade-offs:
-
-- (1) detects information that the parser drops, e.g. a flag bit or a
-  symbol's visibility that the datatype has no field for: the encoder
-  cannot write back what it was never given. (2) does not, since both sides
-  of the equation lose it in the same way.
-- (1) forces the datatype to keep layout details that carry no meaning
-  (section 5.2); (2) needs none of them, and lets the encoder choose its own
-  layout, which is what is wanted when writing new files.
-- (2) checks that the encoder keeps all information in the datatype, which
-  (1) checks too, but (2) does so also for values that did not come from a
-  GNU-built file, e.g. if the layout fields are dropped (section 5.3).
-- Neither detects a parser and an encoder that misinterpret a field in the
-  same way, e.g. both treat the symbol's `st_info` byte with binding and type
-  swapped. Only an independent oracle catches that, e.g. comparing the parsed
-  value with the output of `readelf -h -S -s -r` from GNU binutils (open
-  source, part of the Arm GNU toolchain installed for section 2).
-
-### 5.2 What byte equality costs in the datatype
-
-Measured on the 115 files of section 2 (with a Python script over the raw
-headers):
-
-- The constant fields are the same in all files: `e_ident` is always
-  `7f 45 4c 46 02 01 01` followed by zeros, and `e_version`, `e_ehsize`,
-  `e_phentsize`, `e_shentsize` and `e_phoff` (64) have their standard values.
-  The parser can reject other values and the encoder write the constants, so
-  no field is needed.
-- All bytes not covered by a header, a table or a section's data (4,913 bytes
-  in total, alignment padding) are zero. The parser can check that, so gaps
-  need no field either.
-- The file offsets of the sections cannot simply be recomputed. Only 31 of
-  the 115 files have their sections' data in index order. 99 of the 114
-  object files follow the rule "other sections by index, then `.symtab`,
-  `.strtab`, the `.rela.*` sections and `.shstrtab`, each aligned, then the
-  section headers", the 15 others do not, and `bl31.elf` follows neither.
-  Reproducing GNU `as` and `ld` exactly is not worth it, so the datatype
-  keeps `sh_offset` for each section and `e_shoff`.
-- The string tables cannot be recomputed either. `.shstrtab` shares suffixes
-  between names in 83 of the 115 files (e.g. `.text.foo` is found inside
-  `.rela.text.foo`), and no file's `.shstrtab` is the plain concatenation of
-  the names in section order; `.strtab` is the plain concatenation in 100
-  files, and shares suffixes in 15. So the datatype keeps the bytes of the
-  string tables, and the name offsets (`sh_name`, `st_name`) of sections and
-  symbols.
-
-So the cruft is: `e_shoff`, and for each section `sh_offset` and `sh_name`,
-for each symbol `st_name`, plus the raw string tables. Everything else in
-the file is information that the datatype needs anyway.
-
-### 5.3 Keeping the cruft apart
-
-The cruft can be kept out of the main datatype:
-
-```lean
-/-- Where things are in the file. Only needed to reproduce a file byte for
-byte; without it, the encoder chooses a layout. -/
-structure Layout where
-  shoff : UInt64
-  sectionOffsets : Array UInt64       -- `sh_offset`, by section index
-  sectionNameOffsets : Array UInt32   -- `sh_name`, by section index
-  symbolNameOffsets : Array UInt32    -- `st_name`, by symbol index
-  shstrtab : ByteArray
-  strtab : ByteArray
-
-structure File where
-  -- as in section 3, with names as plain `String`s
-  layout : Option Layout
-```
-
-The parser always fills in `layout`. Then both properties can be tested:
-(1) as is, and (2) with the layout dropped:
-`(parse (encode { f with layout := none })).map ({ · with layout := none })
-= some { f with layout := none }`.
-
-### 5.4 The test
-
-- The ELF parser, the encoder and the test live in Kraken.
-- The test checks the round trip on every object file (`*.o`) and every
-  executable (`*.elf`, e.g. `bl31.elf`) that it finds in a given directory,
-  recursively.
-- Kraken's own test suite runs it on a directory with a few small object
-  files committed to Kraken, chosen especially among those that made the test
-  fail at some point during development. TF-A is BSD-3-Clause, so they can be
-  committed.
-- During development, the exact same test is run on the BL31 build directory
-  `imx-atf/build/imx93/release` (section 2).
-
-### 5.5 A second round trip for the code layer
-
-The same idea applies to instructions: `encodeInstr (decodeInstr w) = w`
-for every word in a `$x` region. This needs an instruction encoder (Kraken
-has none; it relies on an external assembler), which is about as much work
-as the decoder and can be written from the same `sail-arm` encodings. It
-catches decoder bugs that the objdump comparison of section 4.3 would also
-catch, but needs no external tool. Expected obstacles:
-
-- Encodings that Kraken's `Operation` does not distinguish, e.g. a field
-  that the architecture ignores, or two encodings of the same operation.
-  Such words need either an extra field in the decoded item or an exception
-  list in the test.
-- In object files, the decoded operand of a relocated field is a `ConstExpr`
-  with a label, while the word holds 0 or the addend; the encoder has to
-  write back the word as it is in the file, not as it will be after linking.
-
-Not planned for now; the ELF round trip does not depend on it.
-
-### 5.6 A third test: compare a pretty-printer with GNU objdump
-
-`prettyPrint (parse file) = objdump file`: a Lean pretty-printer that
-reproduces the text of GNU `objdump` (from the Arm GNU Toolchain, open
-source). Unlike the round trips, this compares with an independent
-implementation, so it catches a parser or decoder that misinterprets
-something, including errors that an encoder with the mirror-image error
-would hide (section 5.1). It is the only one of the three tests that checks
-the decoder.
-
-`objdump -d -r` on `bl31_main.o` prints e.g.:
-
-```
-Disassembly of section .text.get_arm_std_svc_args:
-
-0000000000000000 <get_arm_std_svc_args>:
-   0:	90000000 	adrp	x0, 0 <get_arm_std_svc_args>
-			0: R_AARCH64_ADR_PREL_PG_HI21	.rodata.psci_args.0
-   4:	91000000 	add	x0, x0, #0x0
-			4: R_AARCH64_ADD_ABS_LO12_NC	.rodata.psci_args.0
-   8:	d65f03c0 	ret
-```
-
-What the printer would have to reproduce, and what that costs:
-
-- Aliases: objdump prints `mov x29, sp` for `add x29, sp, #0`, `cmp` for
-  `subs xzr, ...`, `lsl` for `ubfm`, `cset` for `csinc`, and so on, following
-  the "preferred disassembly" conditions of the Arm architecture. Kraken's
-  printer prints the base instruction. The objdump-compatible printer needs
-  these conditions for every alias. `sail-arm` does not contain them, since
-  they are not part of the ASL pseudocode, so they would have to come from
-  Arm's documentation or from binutils.
-- Operands as objdump shows them: hexadecimal immediates (`#0x0`), branch
-  targets as the unrelocated address followed by the nearest symbol
-  (`0 <get_arm_std_svc_args>`), and comments such as `// #42`. In object
-  files, the relocated operands are printed with their unrelocated values,
-  so the printer must print the word's field, not Kraken's `ConstExpr`; the
-  relocation appears on a separate line.
-- Words that the decoder does not support yet: objdump disassembles them
-  (e.g. SIMD), the printer cannot, so the test needs an exception, e.g.
-  skipping lines whose word is `undecoded`.
-- The exact text depends on the binutils version (here 2.44 in Arm GNU
-  Toolchain 14.3.Rel1), so the expected output has to be produced with a
-  fixed version.
-
-A cheaper variant compares per instruction instead of per text: Kraken's
-assembly parser reads objdump's text of each instruction, and the result
-must equal the decoded `Operation` (section 4.3). Aliases and number
-formats then do not matter, since Kraken's parser already accepts them
-(`mov`, `cmp`, `lsl`, `cset`, `tst`, `ubfx`, `mul`, `neg`, ...); only
-objdump's additions have to be removed first (the `<symbol>` after a branch
-target, `//` comments), and branch targets have to be compared as offsets.
-But it does not test the container layer's output (section and symbol names,
-relocation lines). For the container layer, `readelf -h -S -s -r -W` is the
-better oracle than objdump: it prints all header fields, sections, symbols
-and relocations, and a printer for those is simple.
-
-For Kraken's test suite, the expected `objdump`/`readelf` output of the
-committed object files is committed next to them, so that the test does not
-need the cross toolchain. During development, the same test runs the tools
-on the BL31 build directory.
+The tests take a directory and check every object file (`*.o`) in it,
+recursively. Kraken's test suite runs them on a few small object files
+committed to Kraken (TF-A is BSD-3-Clause), chosen among those that made a
+test fail during development, with the expected `readelf` and `objdump`
+output committed next to them, so that the test suite does not need the
+cross toolchain. During development, the same tests run the tools on the
+BL31 build directory `imx-atf/build/imx93/release` (section 2).
 
 ## 6. Decisions so far
 
 - Goal: proofs about functions in AArch64 object files, composable under
   linking later. Success: a few interesting BL31 functions verified
-  (section 1.1). The first milestone takes platform-independent functions,
-  mostly from TF-A's `libc` (section 1.2.1); the TRDC functions come later,
-  once a TRDC semantics from Sockeye's Lean backend can be combined with
-  Kraken's (section 1.2.2).
+  (section 1.1). The first milestone takes platform-independent functions
+  that make no calls (section 1.2.1); calls come next (1.2.2); the TRDC
+  functions come later, once a TRDC semantics from Sockeye's Lean backend
+  can be combined with Kraken's (section 1.2.3).
 - Proofs use instruction beacons, `instr "<objdump text>" at sym + off`,
   ported from ToySys to Kraken (section 1.3).
 - Instructions come from `objdump -d -r` through Kraken's assembly parser
-  (section 4.5); the Lean decoder is postponed. A Lean instruction encoder
-  that checks objdump's output against the bytes is a later milestone
-  (section 5.0).
+  (section 4.5); the Lean decoder is postponed.
 - The container layer is architecture-independent (ELF64 little-endian) and
   kept in a separate directory or file; the code layer is instantiated only
   for AArch64 for now (section 3).
@@ -1084,13 +925,11 @@ on the BL31 build directory.
   semantics; executing them yields `Effects.unimplemented` (section 4.4).
   Adding them to Kraken's assembly parser (and printer) is fine too, still
   without semantics (section 4.5).
-- Postponed (section 5.0): an ELF encoder and a Kraken test of the round
-  trip on all object files and executables in a directory, recursively;
-  Kraken's test suite would run it on a few committed object files, and
-  during development on the BL31 build directory (section 5.4). Postponed
-  with it: the layout details needed for byte equality, kept in a separate
-  `Layout` (section 5.3); the constant fields and the zero padding are
-  checked by the parser instead of stored (section 5.2).
+- No encoders and no round trips. The ELF parser is tested against
+  `readelf`, and the converter's coverage against `objdump`, on all object
+  files in a directory, recursively; Kraken's test suite runs this on a few
+  committed object files, and during development on the BL31 build
+  directory (section 5).
 
 ## 7. Next steps
 
@@ -1099,9 +938,10 @@ on the BL31 build directory.
 2. Write the objdump-to-Kraken converter, starting with `libc/strlen.o`
    (section 4.5).
 3. Port the `instr _ at _` beacon tactic from ToySys to Kraken (section 1.3).
-4. Verify `strlen`, then `memcpy`, `memcmp` and `memset` (section 1.2.1).
-5. Calls: verify `memmove`, whose tail call to `memcpy` uses `memcpy`'s
-   spec, then `strlcat`.
-6. The ELF container parser for object files, when a target needs data
-   sections or the symbol table beyond what objdump prints (first:
-   `vsnprintf`'s jump table in `.rodata`).
+4. Verify the functions of section 1.2.1 in the suggested order:
+   `imx_validate_ns_entrypoint`, `strlen`, `memcpy`, `memcmp`,
+   `__popcountdi2`, `memset`, `console_unregister`, `strtoul`,
+   `setjmp`/`longjmp`.
+5. Afterwards: calls (section 1.2.2), and the ELF container parser for
+   object files when a target needs data sections (first: `vsnprintf`'s
+   jump table in `.rodata`).
