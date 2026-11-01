@@ -70,3 +70,16 @@ theorem UInt64.ofNat_eq_iff {n : Nat} {x : UInt64} (hn : n < 2 ^ 64) :
     simp only [UInt64.toNat_ofNat']; omega
   · rintro rfl
     exact UInt64.ofNat_toNat
+
+/-- The condition of `b.eq` after `cmp w3, w1`, where `ldrb` loaded the byte
+`b` into `w3` and `and w1, w1, #0xff` truncated `x` to its low byte. -/
+theorem ldrb_cmp_and_eq_iff (b : UInt8) (x : UInt64) :
+    BitVec.extractLsb' 0 32 (BitVec.zeroExtend 64
+      (BitVec.zeroExtend 32 b.toBitVec)) -
+      BitVec.extractLsb' 0 32 (x &&& 255).toBitVec = BitVec.zero 32 ↔
+    b = x.toUInt8 := by
+  rw [← UInt8.toBitVec_inj, UInt64.toBitVec_and, UInt64.toBitVec_toUInt8]
+  generalize b.toBitVec = v
+  generalize x.toBitVec = w
+  simp only [BitVec.zero_eq, UInt64.toBitVec_ofNat]
+  bv_decide

@@ -26,3 +26,5 @@ import ADTF.AtfLibc.Listing.unsigned_num_print_o
 import ADTF.AtfLibc.Common
 import ADTF.AtfLibc.Strlen
 import ADTF.AtfLibc.Strnlen
+import ADTF.AtfLibc.StrnlenSecure
+import ADTF.AtfLibc.Memchr
