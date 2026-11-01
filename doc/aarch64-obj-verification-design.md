@@ -1,34 +1,33 @@
 # Verifying AArch64 object files in Lean: plan and design decisions
 
-This document records the plan and the design decisions for verifying the
-code in AArch64 object files with Kraken (the `kraken` submodule). It is
-extended as the design develops. It started as the design of an ELF parser
-(sections 2 to 5); section 1 describes the goal that replaced that, and
-section 1.5 which parts of the parser design are still needed.
+This document records the plan and the design decisions for proving
+properties of the code in AArch64 object files with Kraken (the `kraken`
+submodule), starting with TF-A's BL31 for the i.MX 93 (the `imx-atf`
+submodule). It is extended as the design develops.
 
 Headings say whether a section is about the first milestone or about later
-work; the next section summarizes both.
+work; the next section summarizes both. Open points are collected in
+section 7, next steps in section 6.
 
 ## Scope at a glance
 
 First milestone:
 
-- Targets: the functions of TF-A's C library that make no calls, refer to no
-  other section and contain no loop, without `putchar` (section 1.2.1):
-  `setjmp` and `longjmp`, 21 instructions without branches, in one object
-  file. Section 1.6 has sample specs. Proofs use instruction beacons that take
-  objdump's text as a string (section 1.3).
-- Input: the objdump listings of these functions, committed verbatim as string
-  definitions in Lean files without imports, turned into lists of Kraken
-  instructions (`List Instr`, as in ToySys, section 1.3.2) by an elaborator; a
-  script regenerates the listings from the pinned BL31 build, and CI checks
-  that `git diff` is then empty (section 4.7). No ELF parser (section 4.6).
-- Work in Kraken: the elaborator; a minimal core for beacons, as in
-  ToySys, built on Kraken's `Operation.interp` instead of its `Executable`
-  (section 1.3.1); the beacon tactic; spec helpers (section 1.6).
-- Not needed: the instructions that Kraken lacks (none of the targets
-  contains one, section 4.4), symbols outside the function (section 4.6),
-  relocations, branch targets (section 4.8), loop rules.
+- Targets: `setjmp` and `longjmp` from TF-A's C library, 21 instructions
+  without branches in one object file (section 1.2.1). Section 1.6 has
+  their specs.
+- Input: the objdump listings of these functions, committed verbatim as
+  string definitions in Lean files without imports, and turned into lists
+  of Kraken instructions (`List Instr`, section 1.3.2) by an elaborator; a
+  script regenerates the listings from the pinned BL31 build, and CI
+  checks that `git diff` is then empty (section 4.7). No ELF parser
+  (section 4.6).
+- Proofs: instruction beacons that take objdump's text as a string
+  (section 1.3), on a small machine model in the style of ToySys, built on
+  Kraken's semantics of single instructions (section 1.3.1).
+- Work in Kraken: the elaborator, the machine model and the beacon
+  tactic. Kraken's parser and semantics already cover the targets
+  (section 1.5).
 - Trusted base: objdump, the elaborator's conversion of the listing,
   Kraken's parser and Kraken's semantics. The layout of the object file
   (4-byte instructions, section 4.9) is a hypothesis of each theorem.
@@ -57,10 +56,6 @@ Later, roughly in this order:
 - A Lean decoder written from `sail-arm`'s encodings, to take objdump out of
   the trusted base (sections 4.1 to 4.3).
 
-Not planned: ELF or instruction encoders, round-trip tests.
-
-Open points are collected in section 8.
-
 ## 1. Goal
 
 Write proofs about the functions in AArch64 object files (`.o`), as the
@@ -79,26 +74,22 @@ they are not needed here).
 
 ### 1.1 Definition of success
 
-Tests of the converter and parsers (section 5) are not the goal: they say
-that a file was read correctly, not that anything about its code was
-proven.
+Lean theorems, checked by Lean, about interesting functions of BL31,
+stated about the code as it is in the object files of the BL31 build, and
+proven with instruction beacons (section 1.3). Each theorem says what the
+function does to registers and memory, under which preconditions, and
+where it returns to. Its trusted base (objdump, the elaborator of section
+4.7, Kraken's parser and semantics) is stated next to it. Tests of the
+tools (section 5) support this, but are not the goal.
 
-Success is now: Lean theorems, checked by Lean, about a few interesting
-functions of BL31, stated about the code as it is in the object files that
-the BL31 build produced, and proven with instruction beacons (section 1.3).
-For the first milestone, these are functions from TF-A's C library that
-make no calls and contain no loops (section 1.2.1); the C library's
-functions with loops come next, then other platform-independent functions
-without calls (section 1.2.2), then calls (section 1.2.3). The TRDC
-functions (the Trusted Resource Domain Controller, which the i.MX 93 uses to
-restrict which bus masters may access which memory and peripherals) are the
-eventual goal, but need a TRDC semantics combined with Kraken's ISA
-semantics, planned via Sockeye's Lean backend (section 1.2.4).
-
-Each theorem says what the function does to registers and memory, under
-which preconditions, and that it returns to its caller.
-What the trusted base of such a theorem is (objdump, the converter of
-section 4.5, Kraken's semantics) is stated next to it.
+The targets come in this order: the C library's functions without calls or
+loops (the first milestone, section 1.2.1), its functions with loops, other
+platform-independent functions without calls (section 1.2.2), then calls
+(section 1.2.3). The eventual goal is the TRDC functions (the Trusted
+Resource Domain Controller, which the i.MX 93 uses to restrict which bus
+masters may access which memory and peripherals). They need a semantics of
+the TRDC combined with Kraken's ISA semantics, planned via Sockeye's Lean
+backend (section 1.2.4).
 
 ### 1.2 Candidate functions
 
@@ -108,13 +99,9 @@ a function exercises are what makes it interesting beyond its size.
 
 #### 1.2.1 First milestone: TF-A's C library, functions without calls or loops
 
-Verifying the TRDC functions (section 1.2.4) needs a semantics of the TRDC,
-combined with Kraken's ISA semantics. That is planned via Sockeye's Lean
-backend, but too big for a first milestone. Calls and loops are left for
-later too (section 1.2.3, and below). The first milestone takes the
-functions of TF-A's C library (`lib/libc`, built into
-`build/imx93/release/libc/*.o`; not all of it is linked into `bl31.elf`,
-but all of it is in object files) that
+The first milestone takes the functions of TF-A's C library (`lib/libc`,
+built into `build/imx93/release/libc/*.o`; not all of it is linked into
+`bl31.elf`, but all of it is in object files) that
 
 - make no calls: no `bl`, `blr`, `br`, and no `b` to another function (a
   tail call), i.e. no `CALL26` or `JUMP26` relocation;
@@ -128,9 +115,10 @@ The C library has 40 function symbols in 31 object files. 16 make calls
 `unsigned_num_print.part.0` in `printf.o`, `strcpy_secure`, `strlcat`), and
 `atexit` refers to the global `exitfun` (section 1.2.2). The remaining 23
 contain no instruction that Kraken lacks (section 4.4), access no device or
-system registers, and have no relocations. Only 3 of them have no loop, and
-these 3 have no branch at all, apart from the final `ret`. The first
-milestone takes two of them:
+system registers, and have no relocations. 20 of them loop. The other 3
+have no branch apart from the final `ret`: `putchar`, the C library's weak
+default (a single `ret`, which `bl31.elf` replaces by the `putchar` of
+`bl31/multi_console.o`), and the two that the first milestone takes:
 
 - `setjmp` (10) and `longjmp` (11), assembly (`lib/libc/aarch64/setjmp.S`,
   both in `libc/setjmp.o`): save and restore the callee-saved registers,
@@ -138,13 +126,9 @@ milestone takes two of them:
   caller but to where `setjmp` was called, so its spec is about control
   flow.
 
-The third, `putchar` (1 instruction: `ret`; the C library's weak default,
-which returns its argument), is left out: `bl31/multi_console.o` defines a
-strong `putchar`, so `bl31.elf` does not contain libc's.
-
-So the first milestone is 21 instructions in one object file, enough to
-build and test the whole path: listings, elaborator, script, beacons, spec
-helpers, memory reasoning for a 112-byte buffer.
+These are 21 instructions in one object file, enough to build and test
+the whole path: listings, elaborator, script, beacons, memory reasoning
+for a 112-byte buffer.
 
 Later, next: the other 20, which loop. Sizes are in instructions:
 
@@ -241,6 +225,11 @@ step towards composition (section 1.4):
   security-relevant invariant (the map stays sorted and without overlaps).
 - `xlat_tables_map_region`: recursive; calls `xlat_desc`.
 
+Calls need specs of callees as hypotheses, the link register,
+callee-saved registers and the stack frame. Kraken's AArch64 examples on
+`main` have no calls; the `vcgen` branch (Sebastian Graf's, not merged) has
+frame-based specs and a call example for x86-64 only.
+
 Some of these call platform code on error paths only (`tf_log`,
 `console_flush`, `el3_panic`, `plat_panic_handler`). Their specs enter as
 hypotheses about undefined symbols, e.g. "does not return", or the
@@ -287,6 +276,14 @@ could be done:
   (`R_AARCH64_ABS64` relocations in `.data.trdc_cfg_info`), the inlined ELE fuse
   read (MMIO polling loop), a call to `NOTICE` (`printf`).
 
+Every TRDC function accesses device registers. Kraken's AArch64 semantics
+has `nonmem_load` and `nonmem_store` effects, but its `Effects.All` maps
+them to `False`, so no MMIO access can be verified yet. Kraken's x86-64
+side has an example with a device state
+(`Kraken/X64/Examples/IncrementMMIO.lean`), and ToySys has a `Platform`
+with `read` and `write` relations; one of these designs has to come to
+AArch64, with the device semantics generated by Sockeye's Lean backend.
+
 The ToySys model (`doc/ToySys/System.lean`) already has a TRDC whose MRC
 region descriptors are written by a firmware program; the spec of
 `trdc_mrc_rgn_config` and `trdc_setup` can state their effect in the same
@@ -327,53 +324,44 @@ instruction and `a` its address, both redundant (they follow from the program
 and the state), but checked, so that a proof script can be read next to a
 disassembly and fails at the first place where it and the code disagree.
 
-For object files, the natural form is the text that objdump prints, at the
-function's symbol plus the offset that objdump prints, e.g.
+In ToySys, `i` is a Lean term (`.cmp .X0 (.reg .X1)`). Here, `i` is
+the instruction as objdump prints it, and `a` the function's symbol plus
+the offset that objdump prints, e.g.
 
 ```lean
   instr "ldrb w1, [x4, #-1]!" at memmove + 0x28
 ```
 
-In ToySys, `i` is a Lean term (`.cmp .X0 (.reg .X1)`). In the first
-milestone, `i` is a string: the instruction as objdump prints it, parsed
-with Kraken's existing assembly parser (and later objdump's branch-target
-form `14 <strlen+0x14>`, section 4.8). So a beacon can be pasted from the
-committed objdump listing (section 4.7).
+so that a beacon can be pasted from the committed listing (section 4.7).
+The tactic parses the string with Kraken's assembly parser at elaboration
+time and compares the result with the fetched `Instr`. The address is
+relative to the function's symbol, since an object file has no addresses;
+with the layout hypothesis of section 4.9, `memmove + 0x28` is the
+function's start address plus 0x28. Later, as in ToySys, conditional
+branches give two goals (with objdump's branch-target form
+`14 <strlen+0x14>`, section 4.8), and calls continue with the callee's
+spec.
 
-Kraken has no such tactic. Its `kstep` steps through straight-line code
-without naming the instructions. Porting `instr` means:
-
-- parsing the string with Kraken's assembly parser at elaboration time and
-  comparing the result with the fetched `Instr`;
-- expressing the address relative to the function's symbol, since an
-  object file has no addresses (section 1.4); with the layout hypothesis
-  of section 4.9, `strlen + 0x14` is the start address plus 0x14;
-- the special cases that ToySys has: conditional branches give two goals,
-  calls continue with the callee's spec.
+Kraken has no such tactic: its `kstep` steps through straight-line code
+without naming the instructions.
 
 #### 1.3.1 A minimal core for beacons (first milestone)
 
-Kraken's machine model around `Operation.interp` is more general than
-beacons need:
+Kraken's machine model around `Operation.interp` (the semantics of one
+instruction) runs whole programs: a program is a list of directives
+(`instr`, `label`, `byteArray`), placed by a `Layout` that gives each
+directive an arbitrary size; `Executable.step` and
+`Executable.straightline` find the directives at the program counter by
+walking that list and run one instruction or all instructions up to a
+jump; `Executable.labels` takes symbol addresses from the program's own
+labels and gives all others the address -1; `kprologue` and the `kstep`
+simproc are built around this.
 
-- a program is a list of directives (`instr`, `label`, `byteArray`), placed
-  by a `Layout` that gives each directive an arbitrary size;
-- `Executable.withAddresses`, `directivesAtAddress` and
-  `directivesFromAddress` find the directives at the program counter by
-  walking the list;
-- `Executable.straightline` runs all directives from the program counter
-  until a jump, `Executable.step` (used by `step1`) those at the program
-  counter, i.e. labels and one instruction;
-- `Executable.labels` takes symbol addresses from the program's own labels
-  and gives all others the address -1 (section 4.6);
-- `kprologue` and the `kstep` simproc are built around
-  `Executable.straightline` and `Directives.interp`.
-
-ToySys has none of this: a program is a map from addresses to
-instructions, `Loaded prog f code` says that the list `code` is at address
-`f` with 4 bytes per instruction, and `Core.step` fetches one instruction
-and runs it. A beacon tactic for Kraken can be built the same way, using
-from Kraken only what describes one instruction:
+ToySys's model is simpler: a program is a map from addresses to
+instructions, `Loaded prog f code` says that the list `code` is at
+address `f` with 4 bytes per instruction, and `Core.step` fetches one
+instruction and runs it. The beacon core is ToySys's model with Kraken's
+instructions and their semantics:
 
 ```lean
 /-- The code in memory: the instruction at each address, if any. -/
@@ -397,29 +385,21 @@ def Code.stepWp [Labels] (code : Code) (s : MachineState)
   (code.step s).All post
 ```
 
-The rest is ToySys's, translated: a fetch lemma (from `Loaded code f instrs` and
-`instrs[((a - f) / 4).toNat]? = some i`, proved by `rfl` for concrete `instrs`,
-`a` and `f`, conclude `code a = some i`), `step_of_fetch` and `wp_of_pc`, and
-the `instr` tactic, which parses its string with Kraken's parser, checks the
-address with `bv_decide` and the instruction with `rfl`, and unfolds
-`Instr.interp` and the declarations marked `@[kstep]`, splitting conditional
-branches into two goals. About 150 lines, judging by ToySys.
+The rest is ToySys's, translated: a fetch lemma (from
+`Loaded code f instrs` and `instrs[((a - f) / 4).toNat]? = some i`, proved
+by `rfl` for concrete `instrs`, `a` and `f`, conclude `code a = some i`),
+`step_of_fetch` and `wp_of_pc`, and the `instr` tactic, which parses its
+string with Kraken's parser, checks the address with `bv_decide` and the
+instruction with `rfl`, and unfolds `Instr.interp` and the declarations
+marked `@[kstep]`. About 150 lines, judging by ToySys.
 
-Kept from Kraken: `Instr`, `Operation` and `Operation.interp` with all its
-helpers, `ConstExpr` and `evalBranchTarget`, `MachineState`, `Effects`
-and `Effects.All`, `Mem` and its separation logic, `Eventually`,
-`step_cps` and `eventually_trans`, and the parser. Not used: `Layout`,
-`Executable`, `Directives.interp`, `Executable.step` and `straightline`,
-`Executable.labels`, `kprologue`.
+From Kraken it uses `Instr`, `Operation` and `Operation.interp` with all
+its helpers, `ConstExpr` and `evalBranchTarget`, `MachineState`,
+`Effects` and `Effects.All`, `Mem` and its separation logic, `Eventually`,
+`step_cps` and `eventually_trans`, and the parser; not `Layout`,
+`Executable` or `kprologue`. Why:
 
-This would not end up almost the same as Kraken's code. The new part is ToySys's
-model, not a copy of Kraken's: an address map instead of a list of sized
-directives, one instruction per step instead of straight-line runs, symbol
-addresses from a parameter instead of from the program's labels. What overlaps
-is `Code.step`, which is the one-directive case of `Directives.interp` (a few
-lines). In exchange:
-
-- The layout hypothesis of section 4.9 is `Loaded`, which states the
+- The layout hypothesis (section 4.9) is `Loaded`, which states the
   4-byte spacing directly, instead of a hypothesis about Kraken's
   `Layout`.
 - Symbol addresses come from a `Labels` instance that the theorems take
@@ -432,67 +412,43 @@ lines). In exchange:
   one `Loaded` hypothesis per function about the same `code`
   (section 1.4). Kraken's `NOTES.md` names composition as the weak point
   of its layout-based model.
-- A listing is a `List Instr` in the first milestone (section 1.3.2) and
-  a Kraken `Program` later (section 1.3.3).
 
-What is lost: theorems are about `Code.step`, not about Kraken's
-`Executable.step`, so Kraken's existing tools that work on `Executable`
-(`kprologue`, `kstep`'s straight-line unrolling, `Executable.eval` for testing)
-do not apply. If needed, a lemma relating the two can be proved later: for the
-program `instrs.map .instr` with the function's label in front and
-`Program.fakeLayout`-style sizes, `Executable.step` at an instruction's address
-does what `Code.step` does. And whether `simp only` with the `@[kstep]`
-declarations reduces `Operation.interp` fast enough is open; Kraken's
-`kdeltaBetaOnly` simproc exists for this and could be reused, since only its
-`Directives.interp` case is tied to straight-line code.
+The cost: theorems are about `Code.step`, so Kraken's tools that work on
+`Executable` (`kprologue`, `kstep`'s straight-line unrolling,
+`Executable.eval` for testing) do not apply. If needed, a lemma can relate
+the two: for the program `instrs.map .instr` with the function's label in
+front and `Program.fakeLayout`-style sizes, `Executable.step` at an
+instruction's address does what `Code.step` does.
 
 #### 1.3.2 A list of instructions, as in ToySys (first milestone)
 
-In the first milestone, the listings stay as close as possible to ToySys:
 `objdumpAArch64` returns a `List Instr` (ToySys's `code`), after checking
-and dropping the function's label, and `Loaded` (section 1.3.1), the fetch
-lemma, `step_of_fetch`, `wp_of_pc` and `instr` are ToySys's, with ToySys's
-`Instr`, `State` and `Effects` replaced by Kraken's. The only differences
-left are the ones Kraken's semantics forces: the program counter is an
-`Int64`, not a `BitVec 64`, and the effects of an instruction are Kraken's
-`Effects` with `Effects.All` instead of ToySys's `Effects.wp` on a
-platform. Section 1.3.3 has them too.
+and dropping the function's label. `Loaded`, the fetch lemma and `instr`
+are then ToySys's (section 1.3.1), with only the differences that Kraken's
+semantics forces: the program counter is an `Int64`, not a `BitVec 64`,
+and the effects of an instruction are Kraken's `Effects` with
+`Effects.All` instead of ToySys's `Effects.wp` on a platform. The address
+arithmetic is `(a - f) / 4`, and specs read like ToySys's
+(`Loaded prog (syms "max3") max3_code` there, `Loaded code longjmp
+longjmp_o` here). For the first milestone (one label per function, at its
+start, no data, no branches) nothing is lost.
 
-Why:
+What a `List Instr` cannot represent:
 
-- `Loaded` and the fetch lemma are ToySys's; the proof for `BitVec 64`
-  should carry over to `Int64`. The address arithmetic is `(a - f) / 4`,
-  with no sum of directive sizes.
-- Proofs and specs read like ToySys's (`Loaded prog (syms "max3")
-  max3_code` there, `Loaded code longjmp longjmp_o` here).
-- Less to explain and to trust: no `Program.offset`, no `Program.instrAt`,
-  no statement about labels.
-- For the first milestone (one label per function, at its start, no data,
-  no branches) nothing is lost.
-
-What it costs later:
-
-- Assembly functions can have local symbols inside them, e.g.
+- Local symbols inside a function. Assembly functions can have them, e.g.
   `flush_dcache_range` in `bl31/cache_helpers.o` has `<loop_civac>:` at
-  0x20 and `<exit_loop_civac>:` at 0x34, and objdump prints its branches as
-  `b.cc 20 <loop_civac>`. A `List Instr` has no place for them. The
-  elaborator could rewrite such a target to `flush_dcache_range + 0x20`
-  (it sees the label's offset in the listing), but then a beacon copied
-  from the listing contains `<loop_civac>`, and the beacon tactic would
-  have to do the same rewriting from the number `20` and the function
-  symbol of its `at` address. With `Program` (section 1.3.3), `Loaded`
-  relates `loop_civac` to the symbol map and nothing needs rewriting.
-- Data in code (`.word` in assembly, `byteArray`) cannot be represented;
-  such functions are rejected (none so far).
-- Running a listing with Kraken's `Program.fakeLayout` and
-  `Executable.eval`, or relating `Code.step` to `Executable.step`, needs
-  `instrs.map .instr` first. A one-liner, but a conversion.
-- Moving to `Program` changes the type of every `*_o` definition and
-  `Loaded`; the proofs themselves should not change, since the `instr`
-  tactic hides the fetch.
+  0x20 and `<exit_loop_civac>:` at 0x34, and objdump prints its branches
+  as `b.cc 20 <loop_civac>`. Rewriting such a target to
+  `flush_dcache_range + 0x20` would have to happen both in the elaborator
+  and in the beacon tactic, since a beacon copied from the listing
+  contains `<loop_civac>`.
+- Data in code (`.word` in assembly); the elaborator rejects it (none so
+  far).
 
 Kraken's `Program` (section 1.3.3) takes over when the first function with
-local symbols or data in code is verified.
+local symbols or data in code is verified. That changes the type of every
+`*_o` definition and of `Loaded`; the proofs should not change, since the
+`instr` tactic hides the fetch.
 
 #### 1.3.3 Later: Kraken's `Program` in the beacon core
 
@@ -531,113 +487,101 @@ What a proof about one object file can assume, so that proofs compose:
   composition of programs hard, and plans to make the semantics depend only
   on the addresses of the current and the next instruction, which would help.
 
-### 1.5 What of this design is needed when
+### 1.5 What Kraken already provides (first milestone)
 
-Needed for the first milestone, and not in Kraken yet:
-
-- The path from objdump's output into Lean (section 4.7): committed
-  objdump listings, read by an elaborator that turns them into a
-  `List Instr`, a script that regenerates them, and a CI check.
-- The beacon core (`Code`, `Loaded`, `Code.step`, section 1.3.1), which
-  also states the layout hypothesis (section 4.9).
-- Instruction beacons taking a string (section 1.3).
-
-Needed for the first milestone, and already in Kraken (`main` at
-`c9aa45e`):
+Kraken's `main` at `c9aa45e` has:
 
 - The assembly parser, accepting objdump's aliases (`mov`, `cmp`, `lsl`,
   `cset`, `tst`, `ubfx`, ...), and `parseAArch64("...")` to write programs
-  in Lean files, and `parseFileAArch64("path")`, which reads and parses a
-  file at elaboration time. It parses all 21 instructions of `setjmp`
-  and `longjmp` as objdump prints them, with the offset and
-  instruction word columns dropped and the tabs and `//` comments kept
-  (checked with `parseAArch64` at Kraken `c9aa45e`): e.g. `mov x7, sp`
-  becomes `ADD_e x7, sp, #0`, `mov x0, #0x0  // #0` becomes `MOVZ`, and
+  in Lean files. It parses all 21 instructions of `setjmp` and `longjmp`
+  as objdump prints them, with the offset and instruction word columns
+  dropped and the tabs and `//` comments kept (checked with
+  `parseAArch64` at Kraken `c9aa45e`): e.g. `mov x7, sp` becomes
+  `ADD_e x7, sp, #0`, `mov x0, #0x0  // #0` becomes `MOVZ`, and
   `ldp x7, xzr, [x0, #96]` loads into `XZR`.
+- `Instr`, `Operation.interp` and the `@[kstep]` declarations that unfold
+  it, `MachineState`, `Effects` and `Effects.All`,
+  `Effects.unimplemented` (whose weakest precondition is `False`),
+  separation logic for memory (`=⋆`, `ecancel`, `load_sep`, `store_sep`),
+  and `Eventually` with `eventually_trans`.
 - `ConstExpr` with `label`, `add`, `pg_hi21` and `lo12`, and the `Labels`
-  class for symbol addresses, which is what relocations need (later; the
-  first-milestone functions have no relocations, section 4.6).
-- `Effects.unimplemented`, whose weakest precondition is `False`.
-- `Instr`, `Operation.interp` and the `@[kstep]` declarations that
-  unfold it, `MachineState`, `Effects` and `Effects.All`, separation logic
-  for memory (`=⋆`, `ecancel`, `load_sep`, `store_sep`), and `Eventually`
-  with `eventually_trans`. Not used: `Executable`, `kprologue` and
-  `kstep`'s straight-line unrolling (section 1.3.1).
-- Kraken's README says it verifies code "disassembled from compiler output
-  (`.o` files)", but `main` contains no tool for that; the path of
-  section 4.7 is new.
+  class for symbol addresses, which is what relocations need later
+  (section 2).
 
-Later:
-
-- For the C library functions with loops: Kraken's parser accepting
-  objdump's branch-target form `14 <strlen+0x14>` (section 4.8), a loop
-  rule, conditional branches in the beacon tactic, string predicates.
-- Adding the instructions that Kraken lacks to `Operation` and the parser
-  (section 4.4); no first-milestone function contains one.
-- External symbols: Kraken's `Executable.step` resolves labels only from
-  the program itself and gives every other label the address -1
-  (section 4.6); needed for the first function that refers to another
-  section, e.g. `atexit`.
-- Calls: specs of callees as hypotheses, the link register, callee-saved
-  registers and the stack frame. Kraken's AArch64 examples on `main` have
-  no calls; the `vcgen` branch (Sebastian Graf's, not merged) has
-  frame-based specs and a call example for x86-64 only.
-- An ELF container parser for object files (section 3), because later
-  proofs need what `objdump -d -r` does not give (section 4.5): the contents
-  of data sections, relocations in data sections, and the symbol table. The
-  first targets that need it are `get_el_str` and `plat_log_get_prefix`
-  (constant tables, section 1.2.3) and `vsnprintf` (its jump table in
-  `.rodata.vsnprintf`). The TRDC functions need it for `fuse_data`,
-  `trdc_mgr_blks` and the configuration tables (with `R_AARCH64_ABS64`
-  relocations in `.data.trdc_cfg_info`). Executables (`bl31.elf`) and
-  segments can wait until the composition step.
-- A way to state the initial contents of data sections in a precondition,
-  from the parsed ELF file.
-- MMIO with a device model, for the TRDC functions. Every TRDC function
-  accesses device registers. Kraken's AArch64 semantics has `nonmem_load`
-  and `nonmem_store` effects, but its `Effects.All` maps them to `False`, so
-  no MMIO access can be verified yet. Kraken's x86-64 side has an example
-  with a device state (`Kraken/X64/Examples/IncrementMMIO.lean`), and ToySys
-  has a `Platform` with `read` and `write` relations; one of these designs
-  has to come to AArch64, with the device semantics generated by Sockeye's
-  Lean backend.
-- The Lean instruction decoder (sections 4.1 to 4.3), to take objdump out of
-  the trusted base; the `sail-arm` encodings stay the reference for it.
-
-Background only: the mapping symbols (section 2.1) explain why objdump can
-tell code from data; the converter itself does not need them.
-
-Removed:
-
-- ELF and instruction encoders, round-trip tests, and the layout details
-  that byte-exact round trips need: producing files is not a goal, and
-  comparing with `readelf` tests the parser better (section 5.3).
-- A pretty-printer compared with objdump, since objdump is now the source of
-  the instructions, not an oracle.
-- The code-layer datatype `CodeItem`/`CodeSection` (section 3): replaced by
-  one Kraken `Program` per section, as Kraken's parser produces it, plus the
-  symbols of that section as labels.
+Kraken's README says it verifies code "disassembled from compiler output
+(`.o` files)", but `main` contains no tool for that: the path of
+section 4.7 and the beacons of section 1.3 are new.
 
 ### 1.6 Sample specs (first milestone)
 
-Sketches, not yet checked by Lean. They use the beacon core of
-section 1.3.1 (`Code`, `Loaded`, `Code.stepWp`), Kraken's vocabulary
-(`Eventually`, `MachineData` with `regs.X0` ... `regs.SP` as `UInt64`,
-`dmem` with `=⋆` and `List.At`) and a few helpers that are new. Each `*_o`
-list of instructions is elaborated from a committed objdump listing, e.g.
-`def longjmp_o : List Instr := objdumpAArch64(longjmp_o_dump)`
-(section 4.7). Each theorem takes the code in memory, the function's
-address as a parameter named after the function (so that a beacon can say
-`at longjmp + 0x1c`), and `Loaded` as a hypothesis (section 4.9).
+The specs of `setjmp` and `longjmp` were checked by Lean in an experiment
+(ADTF commit `7325d58`, reverted in `00d30c7`); the others are sketches, not
+yet checked. They use the beacon core of section 1.3.1 (`Code`, `Loaded`,
+`Code.stepWp`) and Kraken's vocabulary (`Eventually`, `MachineData` with
+`regs.X0` ... `regs.SP` as `UInt64`, `dmem` with `=⋆` and `List.At`). Each
+`*_o` list of instructions is elaborated from a committed objdump listing,
+e.g. `def longjmp_o : List Instr := objdumpAArch64(longjmp_o_dump)` (section
+4.7). Each theorem takes the code in memory, the function's address as a
+parameter named after the function (so that a beacon can say `at longjmp +
+0x1c`), and `Loaded` as a hypothesis (section 4.9).
 
-The first milestone needs the specs of `setjmp` and `longjmp`. They are
-written out in full, without helper judgments: each states
-`Eventually code.stepWp` from the function's entry, and what the final
-state's program counter, registers and memory are. Helpers for what the
-specs have in common come later, once several functions are verified.
-The specs of the functions with loops (`strlen` to `strtoul`), for later,
-are written with such helpers already (`CalleeSaved`, `Returns`, `Bytes`,
-`CString`), to show what they could look like.
+The specs of `setjmp` and `longjmp` are written out in full, without
+helper judgments: each states `Eventually code.stepWp` from the function's
+entry, and what the final state's program counter, registers and memory
+are. Helpers for what specs have in common come once several functions are
+verified.
+
+`setjmp` saves `x19` to `x30`, `sp` and a zero doubleword (14 doublewords,
+112 bytes) into the buffer and returns 0. `longjmp` restores them and
+"returns" to the saved `x30` with `x0` set to `val`, or 1 if `val` is 0, so
+its postcondition is about the saved state, not about its own caller:
+
+```lean
+/-- The buffer contents that `setjmp` writes for the state `s`. -/
+def jmpBuf (s : MachineData) : List UInt8 :=
+  ([s.regs.X19, s.regs.X20, ..., s.regs.X30, s.regs.SP, 0].map
+    UInt64.toBytes).flatten
+
+theorem setjmp_spec [Labels] (code : Code) (setjmp : Int64)
+    (h : Loaded code setjmp setjmp_o)
+    (s0 : MachineData) (old : List UInt8) (R : DataMem → Prop)
+    (h_old : old.length = 112)
+    (h_mem : s0.dmem =⋆ Eq (old.At s0.regs.X0.toBitVec) ⋆ R) :
+    Eventually code.stepWp (fun s =>
+      s.pc = s0.regs.X30.toInt64 ∧
+      s.data.regs = { s0.regs with X0 := 0, X7 := s0.regs.SP } ∧
+      s.data.status = s0.status ∧
+      s.data.dmem =⋆ Eq ((jmpBuf s0).At s0.regs.X0.toBitVec) ⋆ R)
+    ⟨s0, setjmp⟩
+
+theorem longjmp_spec [Labels] (code : Code) (longjmp : Int64)
+    (h : Loaded code longjmp longjmp_o)
+    (s0 saved : MachineData) (R : DataMem → Prop)
+    (h_mem : s0.dmem =⋆ Eq ((jmpBuf saved).At s0.regs.X0.toBitVec) ⋆ R) :
+    Eventually code.stepWp (fun s =>
+      s.pc = saved.regs.X30.toInt64 ∧
+      s.data.regs.X19 = saved.regs.X19 ∧ ... ∧
+      s.data.regs.X30 = saved.regs.X30 ∧ s.data.regs.SP = saved.regs.SP ∧
+      s.data.regs.X0 = (if s0.regs.X1 = 0 then 1 else s0.regs.X1) ∧
+      s.data.dmem = s0.dmem)
+    ⟨s0, longjmp⟩
+```
+
+`setjmp_spec` states the final registers exactly: `setjmp` writes only
+`x7` (a copy of `sp`) and `x0`. `longjmp_spec` lists the registers that it
+restores; which other registers it writes depends on its listing. A buffer
+is `Eq (bs.At a)` with a hypothesis on `bs.length`, the form that Kraken's
+`storeBytes_sep` takes; whether it also needs a condition that it does not
+wrap around the end of the address space is open (section 7).
+
+`longjmp` tests all 64 bits of `x1` (`ands x0, x1, x1; cinc x0, x0, eq`),
+while C's `val` is an `int` in `w1`, whose upper 32 bits the caller need not
+clear. The spec states what the code does; a C-level spec would add the
+precondition that the upper bits are zero, or compare only `w0`.
+
+#### 1.6.1 Later: specs of the functions with loops
+
+The C library's functions with loops could use helpers like the following.
 `strlen`'s branch targets are `label "strlen" + 0x14` (section 4.8), so
 its theorem will also assume `label "strlen" = strlen`.
 
@@ -757,54 +701,6 @@ theorem strtoul_spec [Labels] (code : Code) (strtoul : Int64)
 
 A second theorem covers `endptr = NULL`, where memory stays unchanged.
 
-`setjmp` saves `x19` to `x30`, `sp` and a zero doubleword (14 doublewords,
-112 bytes) into the buffer and returns 0. `longjmp` restores them and
-"returns" to the saved `x30` with `x0` set to `val`, or 1 if `val` is 0, so
-its postcondition is about the saved state, not about its own caller:
-
-```lean
-/-- The buffer contents that `setjmp` writes for the state `s`. -/
-def jmpBuf (s : MachineData) : List UInt8 :=
-  ([s.regs.X19, s.regs.X20, ..., s.regs.X30, s.regs.SP, 0].map
-    UInt64.toBytes).flatten
-
-theorem setjmp_spec [Labels] (code : Code) (setjmp : Int64)
-    (h : Loaded code setjmp setjmp_o)
-    (s0 : MachineData) (old : List UInt8) (R : DataMem → Prop)
-    (h_old : old.length = 112)
-    (h_mem : s0.dmem =⋆ Eq (old.At s0.regs.X0.toBitVec) ⋆ R) :
-    Eventually code.stepWp (fun s =>
-      s.pc = s0.regs.X30.toInt64 ∧
-      s.data.regs = { s0.regs with X0 := 0, X7 := s0.regs.SP } ∧
-      s.data.status = s0.status ∧
-      s.data.dmem =⋆ Eq ((jmpBuf s0).At s0.regs.X0.toBitVec) ⋆ R)
-    ⟨s0, setjmp⟩
-
-theorem longjmp_spec [Labels] (code : Code) (longjmp : Int64)
-    (h : Loaded code longjmp longjmp_o)
-    (s0 saved : MachineData) (R : DataMem → Prop)
-    (h_mem : s0.dmem =⋆ Eq ((jmpBuf saved).At s0.regs.X0.toBitVec) ⋆ R) :
-    Eventually code.stepWp (fun s =>
-      s.pc = saved.regs.X30.toInt64 ∧
-      s.data.regs.X19 = saved.regs.X19 ∧ ... ∧
-      s.data.regs.X30 = saved.regs.X30 ∧ s.data.regs.SP = saved.regs.SP ∧
-      s.data.regs.X0 = (if s0.regs.X1 = 0 then 1 else s0.regs.X1) ∧
-      s.data.dmem = s0.dmem)
-    ⟨s0, longjmp⟩
-```
-
-`setjmp_spec` states the final registers exactly: `setjmp` writes only
-`x7` (a copy of `sp`) and `x0`. It does not use `Bytes`: `old.length =
-112` and `Eq (old.At a)` are what Kraken's `storeBytes_sep` takes, and
-whether a no-wrap condition is needed is open (section 8). `longjmp_spec`
-lists the registers that it restores; which other registers it writes
-depends on its listing.
-
-`longjmp` tests all 64 bits of `x1` (`ands x0, x1, x1; cinc x0, x0, eq`),
-while C's `val` is an `int` in `w1`, whose upper 32 bits the caller need not
-clear. The spec states what the code does; a C-level spec would add the
-precondition that the upper bits are zero, or compare only `w0`.
-
 ## 2. Test inputs at hand (background)
 
 Building BL31 (`make PLAT=imx93 bl31` in `imx-atf`, with Arm GNU Toolchain
@@ -916,13 +812,20 @@ How often files lack them, checked with `aarch64-none-elf-strip` 14.3 on
 So files without mapping symbols are common in deployment, but the files
 this project will parse (object files and unstripped build outputs) have
 them. For a stripped file, the parser can fall back to treating all
-executable sections as code and keeping undecodable words as `undecoded`,
+executable sections as code and keeping undecodable words as raw bytes,
 with the caveat that data may be decoded as instructions.
 
 ## 3. Lean datatype for an ELF file (later; first sketch)
 
-Not needed for the first milestone (section 4.6). See section 1.5 for which
-parts of this section are still needed later.
+Not needed for the first milestone (section 4.6). Later proofs need
+information from the ELF file that objdump's listing does not give (section
+4.5), and a way to state the initial contents of data sections in a
+precondition. The first targets that need it are `get_el_str` and
+`plat_log_get_prefix` (constant tables, section 1.2.3) and `vsnprintf` (its
+jump table in `.rodata.vsnprintf`). The TRDC functions need it for
+`fuse_data`, `trdc_mgr_blks` and the configuration tables (with
+`R_AARCH64_ABS64` relocations in `.data.trdc_cfg_info`). Executables
+(`bl31.elf`) and segments can wait until composition (section 1.4).
 
 Two layers:
 
@@ -930,8 +833,12 @@ Two layers:
    their raw bytes, segments, symbols and relocations. Parsing it needs no
    knowledge of instructions. Unknown enum values are kept (`other n`) rather
    than rejected, so that any valid ELF file parses.
-2. A code layer on top: the executable sections decoded into Kraken
-   instructions, with relocations and symbols folded into the operands.
+2. A code layer on top: each executable section as a Kraken `Program`
+   (section 1.3.3), with relocations folded into the operands as
+   `ConstExpr`s (section 2), the section's symbols as labels, data as
+   `byteArray` directives. Words that the decoder does not recognize are
+   kept as raw bytes (`byteArray`) rather than rejected, so execution that
+   reaches them gets stuck in a proof.
 
 The container layer accepts ELF64 little-endian files for any machine and
 does not depend on the architecture; it lives in its own directory (or
@@ -1021,36 +928,6 @@ structure File where
 end Elf
 ```
 
-Code layer, sketch:
-
-```lean
-/-- One 4-byte-aligned piece of an executable section. -/
-inductive CodeItem
-  | instr (i : Kraken.AArch64.Instr)   -- operands may mention labels
-  | undecoded (w : UInt32)             -- not (yet) supported by the decoder
-  | data (bytes : ByteArray)           -- between `$d` and the next `$x`
-
-structure CodeSection where
-  name : String
-  items : Array (UInt64 × CodeItem)    -- offset in the section, item
-  labels : Array (UInt64 × String)     -- symbols defined in this section
-```
-
-Open points:
-
-- Whether a `CodeSection` can simply be turned into a Kraken `Program`
-  (`instr`, `label` and `byteArray` directives) for each section, with
-  Kraken's `Labels` class providing the symbol addresses that the linker
-  would choose. Kraken already treats an `.int64` branch target as relative
-  to the current instruction and a `.label` as absolute, which fits object
-  files. What does not fit is a whole file: several sections, undefined
-  symbols, symbol sizes and bindings.
-- Whether `Section.data` should keep the bytes of non-executable sections
-  (needed for constant data that code reads, e.g. `.rodata.psci_args.0`).
-- Representation of the raw integer fields: `UInt64` follows the file;
-  `BitVec 64` is what Kraken's semantics uses.
-- Static archives (`libc.a`) could later be read as a list of object files.
-
 ### 3.1 Why section contents stay bytes in the container layer (later)
 
 An alternative is a single datatype whose executable sections hold decoded
@@ -1077,14 +954,13 @@ layer and computing the decoded view from them:
 The decoded view should still be as convenient as a decoded datatype. One
 way is to make the container parametric in the section contents, e.g.
 `File (Contents : Type)`, with `parse : ByteArray -> Except String (File
-ByteArray)` and a `File.map` that turns `File ByteArray` into `File
-CodeSection` for executable sections.
+ByteArray)` and a `File.map` that turns a `File ByteArray` into a file
+whose executable sections are Kraken `Program`s.
 
 ## 4. Where instruction decoding information comes from
 
 Sections 4.1 to 4.3 are about a Lean decoder, which is later work. The first
-milestone uses the objdump route of section 4.5 and the parser additions of
-section 4.4.
+milestone uses objdump and Kraken's parser instead (sections 4.5 to 4.7).
 
 ### 4.1 Sail's Arm model (later)
 
@@ -1168,58 +1044,37 @@ produce a decoded instruction; it can only run one.
 
 ### 4.2 Sail to Lean (later)
 
-Sail has a Lean backend (`sail -lean`, experimental since Sail 0.20), and
-`sail-arm`'s `arm-v9.4-a/Makefile` has a `gen_lean` target. Work on it is
-recent and ongoing (October 2026):
+Sail has an experimental Lean backend (`sail -lean`), and `sail-arm`'s
+`arm-v9.4-a/Makefile` has a `gen_lean` target. It does not give a decoded
+instruction, since decode calls execute (section 4.1), and it is slow:
+rems-project/sail-arm#33 (merged 2026-10-13) translates slices of the
+v9.4 model, but the integer data-processing decoder is one 2,542-line
+definition taking over 40 minutes to elaborate, and `ldr` did not finish
+in 30 minutes. No repository with the generated Lean is published.
 
-- rems-project/sail#1769 (merged 2026-10-09): Lean backend fixes found while
-  translating `sail-arm`, among them an exponential blowup in the Arm decode
-  functions.
-- rems-project/sail-arm#33 (merged 2026-10-13): translates slices of the
-  v9.4 model (selected with Sail's slicing options, rooted at the `execute_*`
-  functions of the instructions a proof needs) and tests the result against
-  an Apple M4. Small slices (`add`, `eor`, `extr`) build in seconds, but the
-  integer data-processing decoder is one 2,542-line definition taking over
-  40 minutes to elaborate, and `ldr` did not finish in 30 minutes. No
-  repository with the generated Lean is published.
+### 4.3 The decoder (later)
 
-So no ready-to-use Lean translation of the Arm model exists, and translating
-the decoder is currently the slow part.
+Decision: an agent-written Lean decoder from bit patterns to Kraken
+`Operation`s, with the encodings (bit patterns, field positions,
+conditions under which an encoding is undefined, and the order of
+overlapping encodings) taken from `sail-arm`'s `arm-v9.4-a` sources: the
+patterns and field slices in the `__DecodeA64_*` clauses, the conditions
+in the `decode_*` functions. Each decoder case names the `sail-arm` clause
+it follows, so that it can be reviewed against it. Kraken's `Operation`
+set is small (about 100 constructors), so this is a bounded amount of
+code. A code generator that extracts the patterns from `sail-arm` would
+not save much, since the mapping from fields to Kraken's operands cannot
+be produced by a code generator anyway.
 
-### 4.3 Options (later)
-
-1. Agent-written Lean decoder from bit patterns to Kraken `Operation`s,
-   with the encodings taken from `sail-arm` (patterns and field slices in
-   the `__DecodeA64_*` clauses, conditions in the `decode_*` functions).
-   Kraken's `Operation` set is small (about 100 constructors), so this is a
-   bounded amount of code. **Chosen**, see below.
-2. A code generator that extracts the patterns and field slices from the
-   `sail-arm` sources (or Sail's JSON/IR output) and emits the Lean pattern
-   matching; the mapping from fields to Kraken operands would still be
-   code that cannot be produced by the generator.
-3. Translate the `sail-arm` decoder to Lean with Sail's backend. This does
-   not give a decoded instruction (decode calls execute), and it is
-   currently slow to elaborate.
-
-Independently of the option, the decoder can be tested against an existing
-disassembler without any new dependency: `aarch64-none-elf-objdump` prints
-the assembly of each word, Kraken's assembly parser turns that text into an
-`Operation`, and the result must equal the decoder's output. The object files
-from section 2 give thousands of real test words, and Kraken's fuzzer can
-generate more.
+The decoder can be tested against an existing disassembler without any new
+dependency: `aarch64-none-elf-objdump` prints the assembly of each word,
+Kraken's assembly parser turns that text into an `Operation`, and the
+result must equal the decoder's output. The object files from section 2
+give thousands of real test words, and Kraken's fuzzer can generate more.
 
 Other Lean work to look at: LNSym (github.com/leanprover/LNSym), a
 symbolic simulator for Armv8 machine code in Lean, which has its own
 decoder; its coverage and license are not checked yet.
-
-Decision: option 1. The decoder is agent-written Lean that maps bit patterns
-to Kraken `Operation`s, and the encodings (bit patterns, field positions,
-conditions under which an encoding is undefined, and the order of
-overlapping encodings) are taken from `sail-arm`'s `arm-v9.4-a` sources.
-Each decoder case should name the `sail-arm` clause it follows, so that it
-can be reviewed against it. Option 2 does not save much, since the mapping to
-Kraken's operands cannot be produced by a code generator anyway, and option
-3 does not produce decoded instructions.
 
 ### 4.4 Instructions that Kraken lacks (later)
 
@@ -1241,50 +1096,38 @@ instead of proving anything wrong, while code that does not reach it can
 still be verified. No new `Effects` constructor is needed.
 
 Since the new constructors are part of `Operation`, Kraken's printer and
-its assembly parser have to handle them too; the objdump-based testing above
-needs at least the parser. Kraken's fuzzer derives its instruction
+its assembly parser have to handle them too; the objdump-based testing of
+section 4.3 needs at least the parser. Kraken's fuzzer derives its instruction
 generator from all constructors of `Operation` (`gen_ctors% Operation` in
 `KrakenRunnerAArch64.lean`) and compares Kraken's results with real
 execution, so it has to skip the constructors without semantics.
 
-The `undecoded` code item (section 3) remains for words the decoder does not
-recognize at all, e.g. SIMD and floating-point instructions, which do not
-occur in BL31.
+Words that the decoder does not recognize at all, e.g. SIMD and
+floating-point instructions, which do not occur in BL31, stay raw bytes in
+the code layer (section 3).
 
-### 4.5 Without a decoder: objdump and Kraken's parser (first milestone)
+### 4.5 objdump instead of a decoder (first milestone)
 
-How the listing gets into Lean in the first milestone is decided in
-section 4.7; this section describes the general idea and what objdump does
-not give.
+Instead of decoding instruction words in Lean, the instructions come from
+the text that GNU `objdump -d -r` prints, read by Kraken's existing
+assembly parser, which already accepts objdump's aliases. Section 4.7
+describes how for the first milestone. Later, each relocation line is
+folded into the operand of the instruction above it (e.g. `adrp x0, 0
+<...>` with `R_AARCH64_ADR_PREL_PG_HI21 .rodata.psci_args.0` becomes
+`adrp x0, .rodata.psci_args.0`, and the `add` with
+`R_AARCH64_ADD_ABS_LO12_NC` becomes `add x0, x0,
+:lo12:.rodata.psci_args.0`), data lines (`.word`) become `byteArray`
+directives, and the instructions that Kraken lacks are added to its parser
+(section 4.4).
 
-Instead of decoding instruction words in Lean, the code layer could be
-produced from the text that GNU `objdump -d -r` prints, read by Kraken's
-existing assembly parser:
+The costs:
 
-1. Run `objdump -d -r` on the file.
-2. A converter (Lean or a script) turns objdump's listing into assembly that
-   Kraken's parser accepts: drop addresses and raw bytes, drop objdump's
-   annotations (`<symbol>` after branch targets, `//` comments), turn each
-   section into a label per symbol plus instructions, turn data lines
-   (`.word`, hex dumps) into `byteArray` directives, and fold each
-   relocation line into the operand of the instruction above it (e.g.
-   `adrp x0, 0 <...>` with `R_AARCH64_ADR_PREL_PG_HI21 .rodata.psci_args.0`
-   becomes `adrp x0, .rodata.psci_args.0`, and the `add` with
-   `R_AARCH64_ADD_ABS_LO12_NC` becomes `add x0, x0, :lo12:.rodata.psci_args.0`).
-3. Kraken's parser produces a `Program` per section, and the instructions
-   that Kraken does not have yet (section 4.4) have to be added to its parser
-   as well as to `Operation`. This is acceptable; as with `Operation`, they
-   get no semantics (executing them yields `Effects.unimplemented`).
-
-This gives a code layer without writing a decoder, and Kraken's parser
-already accepts objdump's aliases. The costs:
-
-- `objdump` (and the converter) become part of what has to be trusted: a
-  proof about the resulting `Program` is about the file only as far as
-  objdump decodes it correctly. With a Lean decoder, the trusted part is a
-  Lean function that can be reviewed against `sail-arm` clause by clause.
-- Verification needs a cross toolchain at proof time, or the objdump output
-  has to be committed next to each file.
+- `objdump` (and the conversion) become part of what has to be trusted: a
+  proof is about the file only as far as objdump decodes it correctly.
+  With a Lean decoder, the trusted part is a Lean function that can be
+  reviewed against `sail-arm` clause by clause.
+- objdump's output has to be committed next to the proofs (section 4.7),
+  or the cross toolchain is needed at proof time.
 - objdump's text format has to be followed exactly, including its quirks,
   and it can change between binutils versions.
 
@@ -1343,18 +1186,13 @@ symbol, which the elaborator checks and drops (section 1.3.2); the
 first-milestone functions have no branches, and the branch targets of the
 later ones are relative to that symbol (section 4.8).
 
-Symbols outside the function (later). Kraken's `Executable.step` and
-`Executable.straightline` use `Executable.labels`, which gives each label
-that the program defines its address in the layout, and every other label
-the address -1 (`getD (-1)` in `Kraken/AArch64/Semantics.lean`). A theorem
-about a function that refers to another section, e.g. `atexit` with
-`.bss.exitfun`, would then be about code that accesses
-`0xffff_ffff_ffff_ffff`: a valid theorem, but not about the linked
-program. This does not matter for the first milestone, whose functions
-refer to no such symbol (which is why `atexit` was left out). Later, Kraken
-needs a `Labels` instance that takes the addresses of the program's own
-labels from the layout and those of all other symbols from a parameter, and
-step functions that use it.
+Symbols outside the function (later). In the beacon core, symbol
+addresses come from the `Labels` instance that a theorem takes as a
+parameter (section 1.3.1), so a theorem about `atexit` can name the
+address of `.bss.exitfun`. Kraken's `Executable.labels` instead gives
+every symbol that the program does not define the address -1 (`getD (-1)`
+in `Kraken/AArch64/Semantics.lean`), so a theorem about Kraken's
+`Executable` would be about code that accesses `0xffff_ffff_ffff_ffff`.
 
 Later targets (section 1.2.2) then need the relocation lines that `-r`
 prints under an instruction, with symbol and addend, as `ConstExpr`
@@ -1379,69 +1217,43 @@ What neither the first milestone nor these later targets need:
 
 ### 4.7 From objdump's output to Lean (first milestone)
 
-Options:
-
-1. Generated assembly: a script converts the listing into Kraken assembly
-   and writes it, inside `parseAArch64("...")`, into a committed Lean
-   file. Simple, and Lake rebuilds the proofs when the file
-   changes. But the committed text is no longer objdump's, the conversion
-   runs outside Lean, and beacons cannot be pasted from it.
-2. A committed listing file plus an elaborator:
-   `objdumpFileAArch64("libc/strlen.objdump")` reads the file at
-   elaboration time, like Kraken's existing `parseFileAArch64`, converts it
-   in Lean and parses it with Kraken's parser. The conversion is Lean code.
-   (`parseFileAArch64("path")` reads the file with `IO.FS.readFile`, so a
-   relative path is relative to the working directory of the Lean process,
-   not to the Lean file; drops every line that starts with `.` and has no
-   `:`, i.e. assembler directives but not labels like `.L3:`; parses the
-   rest with `parse`; and returns the `Program` as a term, reporting parse
-   errors at the path. Nothing in Kraken uses it. It cannot read objdump's
-   output, whose lines start with offsets and instruction words.)
-   But Lake does not know that the module depends on the listing file (to
-   be confirmed for the Lean version used), so a changed listing need not
-   trigger a rebuild of the proofs.
-3. The listing verbatim inside a Lean file, as a string definition
-   (`def strlen_o_dump : String := r#"<listing>"#`), and an elaborator
-   that converts and parses it at elaboration time
-   (`def strlen_o : List Instr := objdumpAArch64(strlen_o_dump)`). The
-   conversion is Lean code (as in 2), Lake tracks the file (as in 1), the
-   committed text is objdump's own (so a diff against a fresh objdump run
-   is readable), and beacons are copied from it.
-4. Running objdump from Lean at elaboration time: needs the cross toolchain
-   and the object files on every build, and the result depends on the
-   machine. Rejected.
-
-Decision: option 3.
+Decision:
 
 - One Lean file per function to verify (section 4.7.1), named after it
   (`strlen_o.lean`), defines the string `strlen_o_dump`: the output of
   `aarch64-none-elf-objdump -d -r --disassemble=strlen libc/strlen.o`,
   verbatim. A comment above it records the command; the inputs are pinned
   elsewhere (section 4.10). The file imports nothing.
-- The elaborator `objdumpAArch64(strlen_o_dump)`, in Kraken, reads the
-  value of the named string definition, skips objdump's header lines, checks the
-  `<strlen>:` line and that the offsets start at 0 and grow by 4, drops
-  the `<strlen>:` line and the offset and instruction word columns, passes
-  the rest to Kraken's parser, which skips objdump's `//` comments (and
-  later reads its branch targets, section 4.8), and returns the
-  instructions of the parsed `Program` as a `List Instr` (section 1.3.2).
-  It rejects everything else: relocation lines, data lines (`.word`),
-  further symbols.
-- A script in ADTF (it needs the imx-atf build, section 4.7.2) overwrites these
-  files with fresh output from the object files of the pinned build. `git diff`
-  shows what changed; CI runs the script on a clean checkout and fails if `git
-  diff` is then not empty. The script only writes the listing files, never the
-  proofs. The C library's object files contain no time stamps or build paths
-  (checked with `strings`), so a rebuild at the pinned commit with the pinned
-  toolchain should give the same listings.
+- The elaborator `objdumpAArch64(strlen_o_dump)`, in Kraken, reads the value
+  of the named string definition, skips objdump's header lines, checks the
+  `<strlen>:` line and that the offsets start at 0 and grow by 4, drops the
+  `<strlen>:` line and the offset and instruction word columns, passes the
+  rest to Kraken's parser, which skips objdump's `//` comments (and later
+  reads its branch targets, section 4.8), and returns the instructions of
+  the parsed `Program` as a `List Instr` (section 1.3.2). It rejects
+  everything else: relocation lines, data lines (`.word`), further symbols.
+- A script in ADTF (it needs the imx-atf build, section 4.7.2) overwrites
+  these files with fresh output from the object files of the pinned build.
+  `git diff` shows what changed; CI runs the script on a clean checkout and
+  fails if `git diff` is then not empty. The script only writes the listing
+  files, never the proofs. The C library's object files contain no time
+  stamps or build paths (checked with `strings`), so a rebuild at the pinned
+  commit with the pinned toolchain should give the same listings.
+
+Why a string inside a Lean file: Lake rebuilds the proofs when it
+changes (Lake would not know that a module depends on a separate listing
+file that an elaborator reads), the committed text is objdump's own (so a
+diff against a fresh objdump run is readable, and beacons can be copied
+from it), and the conversion is Lean code, checked by Lean. Running
+objdump at elaboration time instead would need the cross toolchain and the
+object files on every build.
 
 Why the proofs are then about this output: each theorem mentions `strlen_o`,
 whose value Lean computes from the string `strlen_o_dump` while elaborating
-`strlen_o`, and Lean checks the proof against that value. The CI
-check ties the string literal to objdump's output for the object file of
-the pinned build. Beacons add a redundant check inside the proofs. What remains
-trusted is objdump, the elaborator's conversion, and Kraken's parser and
-semantics.
+`strlen_o`, and Lean checks the proof against that value. The CI check ties
+the string literal to objdump's output for the object file of the pinned
+build. Beacons add a redundant check inside the proofs. What remains trusted
+is objdump, the elaborator's conversion, and Kraken's parser and semantics.
 
 #### 4.7.1 A listing file
 
@@ -1532,7 +1344,7 @@ committed files either; that is `git diff`'s job. What it does:
    read once). Exactly one must; otherwise the script fails and names the
    candidates (static functions can have the same name in several object
    files, and `putchar` is defined in `libc/putchar.o` and
-   `bl31/multi_console.o`; section 8).
+   `bl31/multi_console.o`).
 5. Runs objdump, checks that the output contains the line
    `0000000000000000 <sym>:` exactly once (for an unknown symbol objdump
    prints only the headers and still exits with 0) and does not contain
@@ -1553,46 +1365,39 @@ The first-milestone functions have no branches apart from `ret`; the C
 library's functions with loops need this section.
 
 objdump prints a branch inside a function as `cbnz w2, 14 <strlen+0x14>`:
-`14` is the target's offset in the section, in hexadecimal without `0x`,
-and `<strlen+0x14>` the same target as symbol plus offset. Kraken's parser
-does not expect the `<...>` part. Dropping it, as the
-converter of section 4.5 originally planned, would be wrong silently:
+`14` is the target's offset in the section, in hexadecimal without `0x`, and
+`<strlen+0x14>` the same target as symbol plus offset. Kraken's parser does
+not expect the `<...>` part. Simply dropping it would be wrong silently:
 Kraken's parser reads `14` as decimal, and Kraken's semantics treats a
 numeric branch target as relative to the branch instruction
-(`ConstExpr.evalBranchTarget`), so `cbnz` at offset 8 would branch to
-offset 8 + 14 = 22 instead of 0x14 = 20.
+(`ConstExpr.evalBranchTarget`), so `cbnz` at offset 8 would branch to offset
+8 + 14 = 22 instead of 0x14 = 20.
 
 Kraken's `ConstExpr` can express the target: `.add (.label "strlen")
 (.int64 0x14)`. `evalBranchTarget` interprets a target that is not a plain
 number as an absolute address, so this is the address of `strlen` plus
 0x14, which is right under the layout hypothesis of section 4.9.
 
-Ways to produce it:
-
-1. The converter computes the offset relative to the branch
-   (`cbnz w2, #12`): no parser change, but the text differs from objdump's
-   and is hard to read, and beacons cannot be pasted.
-2. The converter inserts a label before each branch target (`strlen.0x14:`)
-   and branches to it: no parser change, and branches do not depend on the
-   layout, but the text again differs from objdump's.
-3. Kraken's parser learns objdump's form: a hexadecimal number followed by
-   `<sym>` or `<sym+0xoff>` becomes `.add (.label sym) (.int64 off)`, and
-   it also accepts `sym+off` on its own, which relocations with an addend
-   need later (`trdc_mgr_blks+0x10`). The elaborator checks that `sym` is
-   the function's symbol and that the number equals `off`.
-
-Decision: option 3. Listing lines then reach Kraken's parser unchanged
-apart from the dropped columns, and a beacon's string is objdump's text.
+Decision: Kraken's parser learns objdump's form: a hexadecimal number
+followed by `<sym>` or `<sym+0xoff>` becomes `.add (.label sym) (.int64
+off)`, and it also accepts `sym+off` on its own, which relocations with an
+addend need later (`trdc_mgr_blks+0x10`). The elaborator checks that
+`sym` is the function's symbol and that the number equals `off`. Listing
+lines then reach Kraken's parser unchanged apart from the dropped columns,
+and a beacon's string is objdump's text. (Rewriting the target into an
+offset relative to the branch, or into an inserted label, would avoid
+changing the parser, but the text would then differ from objdump's.)
 
 ### 4.9 The layout hypothesis (first milestone)
 
-A theorem about an object file holds for every address the linker may choose, so
-it quantifies over the function's address. Branch targets like `strlen+0x14` and
-beacon addresses are only right with a hypothesis that the code is laid out as
-in the object file: each instruction takes 4 bytes, each label 0 bytes, and the
-code starts at a multiple of 4. That hypothesis is `Loaded` (section 1.3.1).
-(Kraken's `Layout` lets every directive have an arbitrary size, so a theorem
-about Kraken's `Executable` would need the same hypothesis about its `Layout`.)
+A theorem about an object file holds for every address the linker may
+choose, so it quantifies over the function's address. Branch targets like
+`strlen+0x14` and beacon addresses are only right with a hypothesis that the
+code is laid out as in the object file: each instruction takes 4 bytes, each
+label 0 bytes, and the code starts at a multiple of 4. That hypothesis is
+`Loaded` (section 1.3.1). (Kraken's `Layout` lets every directive have an
+arbitrary size, so a theorem about Kraken's `Executable` would need the same
+hypothesis about its `Layout`.)
 
 This holds for AArch64. Every A64 instruction is 4 bytes; AArch64 has no
 variable-length or compressed encodings (unlike T32 in AArch32, or x86-64).
@@ -1642,18 +1447,17 @@ Pinned inputs:
 
 ## 5. Testing and checking
 
-Producing ELF files or instruction words is not a goal, so there is no ELF
-encoder and no instruction encoder, and no round-trip test. What the proofs
-rely on is checked against independent GNU binutils tools (open source,
-part of the Arm GNU Toolchain installed for section 2).
+What the proofs rely on is checked against independent GNU binutils
+tools (open source, part of the Arm GNU Toolchain installed for
+section 2).
 
 ### 5.1 The committed listings (first milestone)
 
-CI builds BL31 from a clean checkout, runs the listing script of section 4.7.2,
-which overwrites the committed listings, and fails if `git diff` is not empty;
-it also builds the Lean project. Together with Lean checking the proofs against
-the programs elaborated from these listings, this ties each theorem to the
-object file.
+CI builds BL31 from a clean checkout, runs the listing script of section
+4.7.2, which overwrites the committed listings, and fails if `git diff` is
+not empty; it also builds the Lean project. Together with Lean checking the
+proofs against the programs elaborated from these listings, this ties each
+theorem to the object file.
 
 ### 5.2 Coverage of the whole build (later)
 
@@ -1677,77 +1481,10 @@ The ELF container parser (section 3) is compared with `readelf -h -S -s -r
 -W`, which prints all header fields, sections, symbols and relocations. A
 printer for the parsed value in that format is simple. Comparing with an
 independent tool catches misinterpreted fields, e.g. the binding and type in
-a symbol's `st_info` byte swapped, which a round trip with an encoder that
-makes the mirror-image error would not catch. It runs on the same
-directories as the test of section 5.2.
+a symbol's `st_info` byte swapped. It runs on the same directories as the
+test of section 5.2.
 
-## 6. Decisions so far
-
-For the first milestone:
-
-- Goal: proofs about functions in AArch64 object files, composable under
-  linking later. Success: a few interesting BL31 functions verified
-  (section 1.1). The first milestone takes the functions of TF-A's C
-  library that make no calls, refer to no other section and contain no
-  loop, without `putchar`: `setjmp` and `longjmp` (section 1.2.1).
-- Proofs use instruction beacons, `instr "<objdump text>" at sym + off`,
-  whose string is parsed by Kraken's assembly parser (section 1.3).
-- The objdump listings of the verified functions are committed verbatim
-  inside Lean files and elaborated into lists of Kraken instructions; a
-  script regenerates them (section 4.7). No ELF parser and no Lean
-  decoder in the first milestone (section 4.6).
-- The listing files hold objdump's output verbatim in raw string literals, as
-  `String` definitions in files without imports; the script is Python with the
-  standard library only, and does not parse objdump's output (sections 4.7.1
-  and 4.7.2).
-- Proofs use a minimal core for beacons in the style of ToySys (`Code`,
-  `Loaded`, `Code.step`), built on Kraken's `Operation.interp`, not
-  Kraken's `Executable` (section 1.3.1).
-- Each theorem assumes the object file's layout, with `Loaded`: 4-byte
-  instructions, 4-byte-aligned start (section 4.9).
-- No encoders and no round trips (section 5).
-- Kraken changes go on the branch `aarch64-atf` of the `kraken` submodule,
-  the beacons in separate files there; the listings, specs and proofs go
-  into `src/lean/ADTF/AtfLibc/` on ADTF's `main` (section 4.10).
-- imx-atf is pinned by its submodule commit, the toolchain by a committed
-  version file that the scripts check (section 4.10). CI runs the listing
-  script on a clean checkout and fails if `git diff` is not empty.
-- The listing files and `objdumpAArch64` use a `List Instr`, as in ToySys
-  (section 1.3.2).
-
-For later:
-
-- Kraken's parser accepts objdump's branch-target form `14 <strlen+0x14>`
-  as `.add (.label "strlen") (.int64 0x14)` (section 4.8).
-- Listings become Kraken `Program`s once a function with local symbols or
-  data in code is verified (section 1.3.3).
-- The C library's functions with loops (section 1.2.1), then other
-  platform-independent functions without calls (section 1.2.2), then
-  calls (section 1.2.3); the TRDC functions come after that, once a TRDC
-  semantics from Sockeye's Lean backend can be combined with Kraken's
-  (section 1.2.4).
-- Instructions missing from Kraken are added to Kraken's `Operation`, its
-  assembly parser and its printer without semantics; executing them yields
-  `Effects.unimplemented` (section 4.4).
-- Relocated operands are expressed with Kraken's `ConstExpr` (`label`,
-  `pg_hi21`, `lo12`, `add`).
-- The ELF container layer is architecture-independent (ELF64 little-endian)
-  and kept in a separate directory or file; the code layer is instantiated
-  only for AArch64 for now (section 3).
-- Two layers: a container layer that mirrors the file, and a code layer that
-  decodes executable sections into Kraken instructions. Section contents
-  stay bytes in the container layer; decoded instructions are a view
-  computed from them (section 3.1).
-- Use the `$x`/`$d` mapping symbols to separate code from data. Files
-  without them (stripped executables) are not a target, but can be handled
-  by treating executable sections as code (section 2.1).
-- Words the decoder does not support are kept as `undecoded`, not rejected.
-- If a decoder is written, it is agent-written Lean with encodings from
-  `sail-arm` (section 4.3).
-- The converter's coverage is tested on all object files (section 5.2), the
-  ELF parser against `readelf` (section 5.3).
-
-## 7. Next steps
+## 6. Next steps
 
 First milestone:
 
@@ -1756,28 +1493,20 @@ First milestone:
    `setjmp` and `longjmp`; the CI job later.
 2. Write the beacon core and the `instr _ at _` tactic, taking a string,
    in separate files in Kraken (sections 1.3.1 and 4.10).
-3. Prove `setjmp_spec` directly against the beacon core, with the spec
-   written out in full (section 1.6), then `longjmp_spec`. Helpers such as
-   `Returns`, `CalleeSaved` and `Bytes` come later, when more functions
-   show what the specs have in common.
+3. Prove `setjmp_spec` (section 1.6) directly against the beacon core,
+   then `longjmp_spec`.
 
-Later: the C library's functions with loops (section 1.2.1): the parser
-extension for branch targets (section 4.8), a loop rule, conditional
-branches in the beacon tactic, `CString`, in the order suggested in
-section 1.2.1. Then the other functions without calls (section 1.2.2),
-external symbols (section 4.6), calls (section 1.2.3), then the ELF
-container parser for object files when a target needs data sections
-(first: the constant tables of `get_el_str` and `plat_log_get_prefix`, and
-`vsnprintf`'s jump table in `.rodata`), then the rest of the "Later" list
-in "Scope at a glance".
+Later: the list in "Scope at a glance", starting with the C library's
+functions with loops in the order suggested in section 1.2.1.
 
-## 8. Open points
+## 7. Open points
 
 For the first milestone:
 
 1. Whether `simp only` with the `@[kstep]` declarations reduces
-   `Operation.interp` fast enough, or Kraken's `kdeltaBetaOnly` simproc is
-   needed (section 1.3.1).
+   `Operation.interp` fast enough for the `instr` tactic (section 1.3.1),
+   or Kraken's `kdeltaBetaOnly` simproc is needed; only its
+   `Directives.interp` case is tied to straight-line code.
 2. The beacon tactic: parsing the string at elaboration time, comparing it
    with the fetched instruction, the address as symbol plus offset
    (section 1.3). Address equalities on `Int64` can be decided with
@@ -1787,7 +1516,7 @@ For the first milestone:
 3. Kraken's `ret` sets the program counter to `Int64.ofInt x30.signed`,
    the specs say `x30.toInt64`: a lemma relates the two.
 4. Whether a no-wrap side condition on buffers is needed (the `Bytes`
-   predicate of section 1.6, for later), and how `setjmp`'s 14 `stp`
+   predicate of section 1.6.1), and how `setjmp`'s 14 `stp`
    stores into a 112-byte buffer are best related to `jmpBuf` with
    Kraken's separation logic. Kraken's `STP` is two 8-byte stores, and
    `store_sep` and `load_sep` need the accessed bytes as a separate
@@ -1801,12 +1530,6 @@ For the first milestone:
 5. `longjmp`: its 64-bit test of `x1` versus C's `int val` (section
    1.6).
 6. Stating the trusted base next to each theorem (section 1.1).
-7. A complete sample proof: section 1.6 has specs but no proof.
-   `setjmp_spec`'s proof comes first, directly against the beacon core
-   (a beacon per instruction with `step_cps`, `Eventually.done` after
-   `ret`), to test the core of section 1.3.1 before the tactic is general.
-   Conventions for the specs (callee-saved registers, which registers and
-   flags may change, the frame `R`) are settled after more functions.
 
 For later:
 
@@ -1819,8 +1542,9 @@ For later:
    builds BL31, Kraken and the proofs in one job; also confirming that a
    clean rebuild at the pinned commit with the pinned toolchain gives the
    committed listings (section 4.10).
-3. Symbols outside the function: Kraken gives them the address -1
-   (section 4.6); needed for `atexit` and most of section 1.2.2.
+3. Symbols outside the function (section 4.6), needed for `atexit` and
+   most of section 1.2.2: what a theorem assumes about the memory at their
+   addresses.
 4. Relocations with an addend (`trdc_mgr_blks+0x10`), via the parser
    extension of section 4.8.
 5. Name clashes between object files: static functions and section symbols
@@ -1839,3 +1563,11 @@ For later:
    (`memcmp`, `strcmp`); reference functions in Lean (`strtoulRef` and its
    relatives, `strtok_r`'s state, the digits of `unsigned_num_print`), each
    following the C source closely, since a reader has to trust them.
+8. The ELF container layer (section 3): whether `Section.data` keeps the
+   bytes of non-executable sections (needed for constant data that code
+   reads, e.g. `.rodata.psci_args.0`); `UInt64` for its integer fields, as
+   in the file, or `BitVec 64`, as in Kraken's semantics; reading static
+   archives (`libc.a`) as lists of object files.
+9. Conventions for specs (callee-saved registers, which registers and
+   flags may change, the frame `R`), and helpers such as `Returns`, once
+   more functions are verified (section 1.6.1).
