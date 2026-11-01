@@ -42,7 +42,7 @@ macro "uint64_eq" : tactic => `(tactic| (
   apply UInt64.toBitVec_inj.mp
   simp only [UInt64.toBitVec_add, UInt64.toBitVec_sub, UInt64.ofNat_add,
     UInt64.ofNat_toNat, UInt64.toBitVec_ofNat', UInt64.toBitVec_ofNat]
-  bv_decide))
+  all_goals bv_decide))
 
 /-- Proves `d = { s0 with ... }` for a state `d` that the beacons computed,
 field by field. Fields of the right-hand side that are metavariables, e.g.
@@ -176,3 +176,30 @@ theorem sub_one_add_add_one (x : UInt64) (y : BitVec 64) :
   generalize x.toBitVec = v
   simp only [UInt64.toBitVec_one]
   bv_decide
+
+/-- After copying the first `n` bytes of `a` over `b`, copying byte `n`
+too. -/
+theorem List.set_take_append_drop {a b : List UInt8} {n : Nat}
+    (ha : n < a.length) (hb : n < b.length) :
+    (a.take n ++ b.drop n).set n a[n] = a.take (n + 1) ++ b.drop (n + 1) := by
+  rw [List.set_append_right _ _ (by simp; omega)]
+  simp only [List.length_take, Nat.min_eq_left (Nat.le_of_lt ha), Nat.sub_self,
+    List.drop_eq_getElem_cons hb, List.set_cons_zero, List.take_add_one,
+    List.getElem?_eq_getElem ha, Option.toList_some, List.append_assoc,
+    List.singleton_append]
+
+/-- The byte that `strb` stores from a register into which `ldrb` loaded
+`v`. -/
+theorem ldrb_strb_byte (v : BitVec 8) :
+    BitVec.extractLsb' 0 8 (BitVec.extractLsb' 0 32
+      (BitVec.zeroExtend 64 (BitVec.zeroExtend 32 v))) = v := by
+  bv_decide
+
+/-- Rewrites the byte stores of an instruction's effects with
+`MachineData.store_byte_of_sep64 h_mem`, for the separation-logic hypothesis
+`h_mem` about the data memory. The index has to be below the length, which
+the discharger proves with `omega`. -/
+macro "store_byte" h_mem:term:max : tactic => `(tactic|
+  simp (disch := first | rfl | omega | (simp; omega)) only
+    [UInt64.toBitVec_ofNat', ofInt_toNat64, ldrb_strb_byte,
+      MachineData.store_byte_of_sep64 $h_mem, Effects.All])

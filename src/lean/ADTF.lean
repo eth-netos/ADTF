@@ -34,3 +34,4 @@ import ADTF.AtfLibc.Memrchr
 import ADTF.AtfLibc.Memcmp
 import ADTF.AtfLibc.Strcmp
 import ADTF.AtfLibc.Strncmp
+import ADTF.AtfLibc.Memcpy
