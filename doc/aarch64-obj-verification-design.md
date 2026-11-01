@@ -1737,8 +1737,8 @@ For later:
 First milestone:
 
 1. Write the `objdumpAArch64` elaborator, the toolchain version file, the
-   build script, the listing script and the CI job (sections 4.7 and
-   4.10), for `setjmp` and `longjmp`.
+   build script and the listing script (sections 4.7 and 4.10), for
+   `setjmp` and `longjmp`; the CI job later.
 2. Write the beacon core and the `instr _ at _` tactic, taking a string,
    in separate files in Kraken (sections 1.3.1 and 4.10).
 3. Define `Returns`, `CalleeSaved` and `Bytes` (section 1.6).
@@ -1776,37 +1776,45 @@ For the first milestone:
    says `x30.toInt64`: a lemma, or the same form in `Returns`.
 4. The `Bytes` predicate (section 1.6), including the no-wrap side
    condition, and how `setjmp`'s 14 `stp` stores into a 112-byte buffer
-   are best related to `jmpBuf` with Kraken's separation logic.
+   are best related to `jmpBuf` with Kraken's separation logic. Kraken's
+   `STP` is two 8-byte stores, and `store_sep` and `load_sep` need the
+   accessed bytes as a separate conjunct `Eq (bs.At addr)` with
+   `bs.length` the access width; `At_append_sep` splits
+   `(bs1 ++ bs2).At a` into two such conjuncts, so `Bytes (jmpBuf s) a`
+   can be split into 14 doublewords. Still to find or prove: that
+   `Mem.storeInt` with `Int.toBytes 8 v.toInt` stores `UInt64.toBytes`
+   of the register, and that loading those bytes gives the register back
+   (`Kraken/ToBytes.lean` has `UInt64.toBytes_ofBytes`).
 5. `setjmp`/`longjmp`: `longjmp` does not fit `Returns`; its 64-bit test of
    `x1` versus C's `int val` (section 1.6).
-6. Where the `aarch64-atf` branch lives: the `kraken` submodule's URL is
-   upstream (`github.com/AeneasVerif/kraken`), so a clean checkout can
-   only fetch the branch's commits if they are pushed there or the URL in
-   `.gitmodules` points to a fork.
-7. CI: ADTF has none yet, and its `origin` is a local repository. Where CI
-   runs, how it installs the pinned Arm GNU Toolchain, and whether it
-   builds BL31, Kraken and the proofs in one job; also confirming that a
-   clean rebuild at the pinned commit with the pinned toolchain gives the
-   committed listings (section 4.10).
-8. Stating the trusted base next to each theorem (section 1.1).
-9. A complete sample proof: section 1.6 has specs but no proof. Writing
+6. Stating the trusted base next to each theorem (section 1.1).
+7. A complete sample proof: section 1.6 has specs but no proof. Writing
    `setjmp_spec`'s proof first (unfold `Returns`, one step with `step_cps`
    and a beacon per instruction, `Eventually.done` after `ret`) would test
    the core of section 1.3.1 before the tactic is general.
 
 For later:
 
-1. Symbols outside the function: Kraken gives them the address -1
+1. Where the `aarch64-atf` branch lives: the `kraken` submodule's URL is
+   upstream (`github.com/AeneasVerif/kraken`), so a clean checkout can
+   only fetch the branch's commits if they are pushed there or the URL in
+   `.gitmodules` points to a fork.
+2. CI: ADTF has none yet, and its `origin` is a local repository. Where CI
+   runs, how it installs the pinned Arm GNU Toolchain, and whether it
+   builds BL31, Kraken and the proofs in one job; also confirming that a
+   clean rebuild at the pinned commit with the pinned toolchain gives the
+   committed listings (section 4.10).
+3. Symbols outside the function: Kraken gives them the address -1
    (section 4.6); needed for `atexit` and most of section 1.2.2.
-2. Relocations with an addend (`trdc_mgr_blks+0x10`), via the parser
+4. Relocations with an addend (`trdc_mgr_blks+0x10`), via the parser
    extension of section 4.8.
-3. Name clashes between object files: static functions and section symbols
+5. Name clashes between object files: static functions and section symbols
    (`.rodata.str1.1`, `.text.unsigned_num_print`) repeat across files, so
    label names need to be qualified by object file before proofs about
    several files are combined.
-4. The instructions that Kraken lacks, and the coverage test (sections 4.4
+6. The instructions that Kraken lacks, and the coverage test (sections 4.4
    and 5.2).
-5. For the C library's functions with loops: whether objdump's syntax
+7. For the C library's functions with loops: whether objdump's syntax
    parses for all 20; a loop rule (Kraken's `reg_dec_loop` counts a
    register down and is used only in an x86-64 example; `strlen`,
    `memchr`, `strcmp` and `strtoul` loop until they see a certain byte, so
