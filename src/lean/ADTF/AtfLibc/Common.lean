@@ -179,6 +179,12 @@ theorem sub_one_add_add_one (x : UInt64) (y : BitVec 64) :
 
 /-- After copying the first `n` bytes of `a` over `b`, copying byte `n`
 too. -/
+theorem List.getElem_take_append_drop {x y : List UInt8} {n : Nat}
+    (hx : n ≤ x.length) (h : n < (x.take n ++ y.drop n).length) :
+    (x.take n ++ y.drop n)[n] = y[n]'(by simp at h; omega) := by
+  rw [List.getElem_append_right (by simp; omega)]
+  simp [Nat.min_eq_left hx]
+
 theorem List.set_take_append_drop {a b : List UInt8} {n : Nat}
     (ha : n < a.length) (hb : n < b.length) :
     (a.take n ++ b.drop n).set n a[n] = a.take (n + 1) ++ b.drop (n + 1) := by
