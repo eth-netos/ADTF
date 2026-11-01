@@ -15,27 +15,6 @@ Trusted base: as in `ADTF.AtfLibc.Strlen`.
 /-- The instructions of `strtok_r` in ATF's `strtok.o`. -/
 def strtok_r_o : List Instr := objdumpAArch64(strtok_r_o_dump)
 
-/-- The length of `l.takeWhile p` is the index `i` of the first element for
-which `p` is false, or `l.length` if there is none. -/
-theorem List.length_takeWhile_eq {α : Type} {l : List α} {p : α → Bool}
-    {i : Nat} (hi : i ≤ l.length) (h : ∀ j (hj : j < i), p (l[j]'(by omega)))
-    (h2 : ∀ hi' : i < l.length, p l[i] = false) :
-    (l.takeWhile p).length = i := by
-  induction l generalizing i with
-  | nil => simp at hi; simp [hi]
-  | cons x xs ih =>
-    cases i with
-    | zero =>
-      have : p x = false := h2 (by simp)
-      simp [this]
-    | succ i =>
-      have hx := h 0 (by omega)
-      simp only [List.getElem_cons_zero] at hx
-      simp only [List.takeWhile_cons, hx, ite_true, List.length_cons]
-      rw [ih (by simp at hi; omega)
-        (fun j hj => by simpa using h (j + 1) (by omega))
-        (fun hi' => h2 (by simp; omega))]
-
 /-- The number of delimiters before the token that `strtok_r` returns for
 the string `str` (without its terminating 0) and the delimiters `delim`. -/
 def strtokSpan (str delim : List UInt8) : Nat :=
@@ -72,17 +51,6 @@ ends the token, if any, is overwritten with 0. -/
 def strtokStr (str delim : List UInt8) : List UInt8 :=
   if strtokEnd str delim then str ++ [0]
   else (str ++ [0]).set (strtokSpan str delim + strtokTok str delim) 0
-
-/-- `MachineData.store_of_sep64` at offset 0. -/
-theorem MachineData.store_of_sep64_zero {d : DataMem} {bs : List UInt8}
-    {a : BitVec 64} {R : DataMem → Prop} (h : d =⋆ Eq (bs.At a) ⋆ R)
-    (s : MachineData) {w : MemWidth} (v : w.type)
-    (ret : MachineData → Effects) (hd : s.dmem = d)
-    (hi : w.bytes ≤ bs.length) :
-    s.store a v ret =
-      require_write_access a w (fun _ =>
-        ret { s with dmem := Mem.storeInt d a w.bytes v.toInt }) := by
-  simpa using MachineData.store_of_sep64 h s 0 v ret hd (by omega)
 
 /-- The loops of `strtok_r` that scan the token, entered at `strtok_r + 0x4c`
 after the first byte `str[i]` of the token. -/

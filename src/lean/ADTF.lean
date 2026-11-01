@@ -39,3 +39,4 @@ import ADTF.AtfLibc.Swapfunc
 import ADTF.AtfLibc.Strlcpy
 import ADTF.AtfLibc.Memset
 import ADTF.AtfLibc.Strtok_r
+import ADTF.AtfLibc.Strtoul

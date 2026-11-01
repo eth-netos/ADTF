@@ -321,3 +321,35 @@ theorem cmp_hi_iff (r : BitVec 64) (k : BitVec 64) :
     bv_omega
   · intro h
     constructor <;> bv_omega
+
+/-- The length of `l.takeWhile p` is the index `i` of the first element for
+which `p` is false, or `l.length` if there is none. -/
+theorem List.length_takeWhile_eq {α : Type} {l : List α} {p : α → Bool}
+    {i : Nat} (hi : i ≤ l.length) (h : ∀ j (hj : j < i), p (l[j]'(by omega)))
+    (h2 : ∀ hi' : i < l.length, p l[i] = false) :
+    (l.takeWhile p).length = i := by
+  induction l generalizing i with
+  | nil => simp at hi; simp [hi]
+  | cons x xs ih =>
+    cases i with
+    | zero =>
+      have : p x = false := h2 (by simp)
+      simp [this]
+    | succ i =>
+      have hx := h 0 (by omega)
+      simp only [List.getElem_cons_zero] at hx
+      simp only [List.takeWhile_cons, hx, ite_true, List.length_cons]
+      rw [ih (by simp at hi; omega)
+        (fun j hj => by simpa using h (j + 1) (by omega))
+        (fun hi' => h2 (by simp; omega))]
+
+/-- `MachineData.store_of_sep64` at offset 0. -/
+theorem MachineData.store_of_sep64_zero {d : DataMem} {bs : List UInt8}
+    {a : BitVec 64} {R : DataMem → Prop} (h : d =⋆ Eq (bs.At a) ⋆ R)
+    (s : MachineData) {w : MemWidth} (v : w.type)
+    (ret : MachineData → Effects) (hd : s.dmem = d)
+    (hi : w.bytes ≤ bs.length) :
+    s.store a v ret =
+      require_write_access a w (fun _ =>
+        ret { s with dmem := Mem.storeInt d a w.bytes v.toInt }) := by
+  simpa using MachineData.store_of_sep64 h s 0 v ret hd (by omega)
