@@ -1539,16 +1539,17 @@ For later:
    several files are combined.
 6. The instructions that Kraken lacks, and the coverage test (sections 4.4
    and 5.2).
-7. For the C library's functions with loops: whether objdump's syntax
-   parses for all 20; a loop rule (Kraken's `reg_dec_loop` counts a
-   register down and is used only in an x86-64 example; `strlen`,
-   `memchr`, `strcmp` and `strtoul` loop until they see a certain byte, so
-   they need a rule with an invariant and a measure, e.g. the bytes left
-   before the NUL); two goals for a conditional branch in the beacon
-   tactic; `CString`; a second spec form for overlapping read-only buffers
-   (`memcmp`, `strcmp`); reference functions in Lean (`strtoulRef` and its
-   relatives, `strtok_r`'s state, the digits of `unsigned_num_print`), each
-   following the C source closely, since a reader has to trust them.
+7. For the C library's functions with loops: whether objdump's syntax parses
+   for all 20; a loop rule (designed in `doc/loop-rule.md`; Kraken's
+   `reg_dec_loop` counts a register down and is used only in an x86-64
+   example; `strlen`, `memchr`, `strcmp` and `strtoul` loop until they see a
+   certain byte, so they need a rule with an invariant and a measure, e.g.
+   the bytes left before the NUL); two goals for a conditional branch in the
+   beacon tactic; `CString`; a second spec form for overlapping read-only
+   buffers (`memcmp`, `strcmp`); reference functions in Lean (`strtoulRef`
+   and its relatives, `strtok_r`'s state, the digits of
+   `unsigned_num_print`), each following the C source closely, since a
+   reader has to trust them.
 8. The ELF container layer (section 3): whether `Section.data` keeps the
    bytes of non-executable sections (needed for constant data that code
    reads, e.g. `.rodata.psci_args.0`); `UInt64` for its integer fields, as
