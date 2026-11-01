@@ -36,3 +36,4 @@ import ADTF.AtfLibc.Strcmp
 import ADTF.AtfLibc.Strncmp
 import ADTF.AtfLibc.Memcpy
 import ADTF.AtfLibc.Swapfunc
+import ADTF.AtfLibc.Strlcpy

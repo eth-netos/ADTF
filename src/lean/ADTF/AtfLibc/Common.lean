@@ -194,6 +194,33 @@ theorem List.set_take_append_drop {a b : List UInt8} {n : Nat}
     List.getElem?_eq_getElem ha, Option.toList_some, List.append_assoc,
     List.singleton_append]
 
+theorem List.set_take_append_drop' {a b : List UInt8} {n : Nat} (x : UInt8)
+    (ha : n ≤ a.length) (hb : n < b.length) :
+    (a.take n ++ b.drop n).set n x = a.take n ++ x :: b.drop (n + 1) := by
+  rw [List.set_append_right _ _ (by simp; omega), List.length_take,
+    Nat.min_eq_left ha, Nat.sub_self, List.drop_eq_getElem_cons hb,
+    List.set_cons_zero]
+
+/-- After `subs x2, x2, #1` on `x2 = x - n`, a taken `b.ne` means that
+`n + 1` is still below `x`. -/
+theorem subs_count_ne {x : UInt64} {n : Nat} (hn : n < x.toNat)
+    (hne : (!(x - UInt64.ofNat n).toBitVec - 1 == BitVec.zero 64) = true) :
+    n + 1 < x.toNat := by
+  have h1 : (x - UInt64.ofNat n).toBitVec - 1 ≠ 0 := by simpa using hne
+  simp only [UInt64.toBitVec_sub, UInt64.toBitVec_ofNat'] at h1
+  rw [← UInt64.toNat_toBitVec] at *
+  bv_omega
+
+/-- After `subs x2, x2, #1` on `x2 = x - n`, a `b.ne` that is not taken
+means that `n + 1` is `x`. -/
+theorem subs_count_eq {x : UInt64} {n : Nat} (hn : n < x.toNat)
+    (heq : ¬(!(x - UInt64.ofNat n).toBitVec - 1 == BitVec.zero 64) = true) :
+    n + 1 = x.toNat := by
+  have h1 : (x - UInt64.ofNat n).toBitVec - 1 = 0 := by simpa using heq
+  simp only [UInt64.toBitVec_sub, UInt64.toBitVec_ofNat'] at h1
+  rw [← UInt64.toNat_toBitVec] at *
+  bv_omega
+
 /-- The byte that `strb` stores from a register into which `ldrb` loaded
 `v`. -/
 theorem ldrb_strb_byte (v : BitVec 8) :
@@ -207,5 +234,5 @@ theorem ldrb_strb_byte (v : BitVec 8) :
 the discharger proves with `omega`. -/
 macro "store_byte" h_mem:term:max : tactic => `(tactic|
   simp (disch := first | rfl | omega | (simp; omega)) only
-    [UInt64.toBitVec_ofNat', ofInt_toNat64, ldrb_strb_byte,
-      MachineData.store_byte_of_sep64 $h_mem, Effects.All])
+    [UInt64.toBitVec_add, UInt64.toBitVec_ofNat', ofInt_toNat64,
+      ldrb_strb_byte, MachineData.store_byte_of_sep64 $h_mem, Effects.All])
