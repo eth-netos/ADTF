@@ -6,7 +6,8 @@ submodule), starting with TF-A's BL31 for the i.MX 93 (the `imx-atf`
 submodule). It is extended as the design develops.
 
 Headings say whether a section is about the first milestone or about later
-work; the next section summarizes both. Open points are collected in
+work; the next section summarizes both. The first milestone is implemented
+(section 6), except for CI. Open points are collected in
 section 7, next steps in section 6.
 
 ## Scope at a glance
@@ -514,9 +515,10 @@ section 4.7 and the beacons of section 1.3 are new.
 
 ### 1.6 Sample specs (first milestone)
 
-The specs of `setjmp` and `longjmp` were checked by Lean in an experiment
-(ADTF commit `7325d58`, reverted in `00d30c7`); the others are sketches, not
-yet checked. They use the beacon core of section 1.3.1 (`Code`, `Loaded`,
+The specs of `setjmp` and `longjmp` are proven in
+`src/lean/ADTF/AtfLibc/Setjmp.lean` and `Longjmp.lean`, where they are
+written out without the `...` used here; the specs of section 1.6.1 are
+sketches, not yet checked by Lean. They use the beacon core of section 1.3.1 (`Code`, `Loaded`,
 `Code.stepWp`) and Kraken's vocabulary (`Eventually`, `MachineData` with
 `regs.X0` ... `regs.SP` as `UInt64`, `dmem` with `=⋆` and `List.At`). Each
 `*_o` list of instructions is elaborated from a committed objdump listing,
@@ -571,8 +573,8 @@ theorem longjmp_spec [Labels] (code : Code) (longjmp : Int64)
 `x7` (a copy of `sp`) and `x0`. `longjmp_spec` lists the registers that it
 restores; which other registers it writes depends on its listing. A buffer
 is `Eq (bs.At a)` with a hypothesis on `bs.length`, the form that Kraken's
-`storeBytes_sep` takes; whether it also needs a condition that it does not
-wrap around the end of the address space is open (section 7).
+`storeBytes_sep` takes; for `setjmp` and `longjmp`, no condition that it
+does not wrap around the end of the address space was needed.
 
 `longjmp` tests all 64 bits of `x1` (`ands x0, x1, x1; cinc x0, x0, eq`),
 while C's `val` is an `int` in `w1`, whose upper 32 bits the caller need not
@@ -1269,7 +1271,6 @@ module
 /-- `aarch64-none-elf-objdump -d -r --disassemble=longjmp libc/setjmp.o`,
 run in `imx-atf/build/imx93/release`. -/
 @[expose] public def longjmp_o_dump : String := r#"
-
 libc/setjmp.o:     file format elf64-littleaarch64
 
 
@@ -1428,7 +1429,8 @@ ADTF, on `main`:
   touches; later, helpers for what the specs have in common, in a common
   file.
 - The listing script of section 4.7.2 (`src/scripts/atf-listings.py`),
-  and a script that builds BL31, outside the Lean project.
+  and the script that builds BL31 (`src/scripts/build-bl31.py`), outside
+  the Lean project.
 - The toolchain version file (e.g. `src/toolchain/arm-gnu-toolchain.version`).
 
 Pinned inputs:
@@ -1486,15 +1488,20 @@ test of section 5.2.
 
 ## 6. Next steps
 
-First milestone:
+The first milestone is implemented:
 
-1. Write the `objdumpAArch64` elaborator, the toolchain version file, the
-   build script and the listing script (sections 4.7 and 4.10), for
-   `setjmp` and `longjmp`; the CI job later.
-2. Write the beacon core and the `instr _ at _` tactic, taking a string,
-   in separate files in Kraken (sections 1.3.1 and 4.10).
-3. Prove `setjmp_spec` (section 1.6) directly against the beacon core,
-   then `longjmp_spec`.
+- Kraken, branch `aarch64-atf`: `Kraken/AArch64/Objdump.lean` (the
+  `objdumpAArch64` elaborator), `Beacon.lean` (the beacon core and the
+  `instr` tactic), `BeaconMem.lean` (lemmas for loads and stores inside a
+  separation-logic footprint), and their tests `ObjdumpTests.lean` and
+  `BeaconTests.lean`.
+- ADTF: the toolchain version file, `src/scripts/build-bl31.py`,
+  `src/scripts/atf-listings.py`, the listings of `setjmp` and `longjmp`,
+  and the proofs of `setjmp_spec` and `longjmp_spec` (section 1.6), each
+  of which checks in about 2 to 3 seconds.
+
+Still to do for the first milestone: the CI job (section 5.1 and open
+point 2 for later).
 
 Later: the list in "Scope at a glance", starting with the C library's
 functions with loops in the order suggested in section 1.2.1.
@@ -1503,33 +1510,12 @@ functions with loops in the order suggested in section 1.2.1.
 
 For the first milestone:
 
-1. Whether `simp only` with the `@[kstep]` declarations reduces
-   `Operation.interp` fast enough for the `instr` tactic (section 1.3.1),
-   or Kraken's `kdeltaBetaOnly` simproc is needed; only its
-   `Directives.interp` case is tied to straight-line code.
-2. The beacon tactic: parsing the string at elaboration time, comparing it
-   with the fetched instruction, the address as symbol plus offset
-   (section 1.3). Address equalities on `Int64` can be decided with
-   `bv_decide`, as in ToySys on `BitVec 64` (checked with the pinned Lean
-   version: `a + 4 + 4 + 4 = a + 0xc` for an `Int64` variable `a`, with
-   `import Std.Tactic.BVDecide`).
-3. Kraken's `ret` sets the program counter to `Int64.ofInt x30.signed`,
-   the specs say `x30.toInt64`: a lemma relates the two.
-4. Whether a no-wrap side condition on buffers is needed (the `Bytes`
-   predicate of section 1.6.1), and how `setjmp`'s 14 `stp`
-   stores into a 112-byte buffer are best related to `jmpBuf` with
-   Kraken's separation logic. Kraken's `STP` is two 8-byte stores, and
-   `store_sep` and `load_sep` need the accessed bytes as a separate
-   conjunct `Eq (bs.At addr)` with `bs.length` the access width;
-   `At_append_sep` splits `(bs1 ++ bs2).At a` into two such conjuncts, so
-   `Eq ((jmpBuf s).At a)` can be split into 14 doublewords. Still to find
-   or prove: that `Mem.storeInt` with `Int.toBytes 8 v.toInt` stores
-   `UInt64.toBytes` of the register, and that loading those bytes gives
-   the register back (`Kraken/ToBytes.lean` has
-   `UInt64.toBytes_ofBytes`).
-5. `longjmp`: its 64-bit test of `x1` versus C's `int val` (section
+1. `longjmp`: its 64-bit test of `x1` versus C's `int val` (section
    1.6).
-6. Stating the trusted base next to each theorem (section 1.1).
+2. In the proof of `longjmp`, one `simp` pass with the load lemmas
+   rewrites only the first of the two loads of `ldp x19, x20, [x0]` (the
+   one at offset 0, which needs a separate lemma), so the proof runs a
+   second pass. Why is not understood yet.
 
 For later:
 
