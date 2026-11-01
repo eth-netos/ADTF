@@ -30,7 +30,8 @@ theorem strnlen_secure_spec [Labels] (code : Code) (strnlen_secure : Int64)
       s.pc = s0.regs.X30.toInt64 ∧ ∃ r,
       (s0.regs.X0 = 0 → r = 0) ∧
       (s0.regs.X0 ≠ 0 → r ≤ s0.regs.X1.toNat ∧
-        (∀ i < r, bs[i]? ≠ some 0) ∧ (r = s0.regs.X1.toNat ∨ bs[r]? = some 0)) ∧
+        (∀ i < r, bs[i]? ≠ some 0) ∧
+        (r = s0.regs.X1.toNat ∨ bs[r]? = some 0)) ∧
       ∃ x3 st, s.data = { s0 with
         regs := { s0.regs with
           X0 := .ofNat r

@@ -51,6 +51,14 @@ macro "state_eq" : tactic => `(tactic| (
   | (dsimp only
      congr 2 <;> first | rfl | uint64_eq)))
 
+/-- A search through `bs` for `b` that has not found it in the first `n`
+bytes may read the byte at `n`, if `b` is in `bs`. -/
+theorem lt_length_of_forall_ne {bs : List UInt8} {n : Nat} {b : UInt8}
+    (hz : ∀ i < n, bs[i]? ≠ some b) (h : b ∈ bs) : n < bs.length := by
+  obtain ⟨j, hj, hjb⟩ := List.getElem_of_mem h
+  refine Nat.lt_of_not_le fun hle => hz j (by omega) ?_
+  simp [hj, hjb]
+
 /-- A search through `bs` that has found no 0 in the first `n` bytes and
 stops at the latest after `m` bytes, where `bs` is at least `m` bytes long or
 contains a 0, may read the byte at `n`. -/
@@ -59,9 +67,7 @@ theorem lt_length_of_no_zero {bs : List UInt8} {n m : Nat}
     (h_bs : m ≤ bs.length ∨ 0 ∈ bs) : n < bs.length := by
   rcases h_bs with h_bs | h_bs
   · omega
-  · obtain ⟨j, hj, hj0⟩ := List.getElem_of_mem h_bs
-    refine Nat.lt_of_not_le fun hle => hz j (by omega) ?_
-    simp [hj, hj0]
+  · exact lt_length_of_forall_ne hz h_bs
 
 theorem UInt64.ofNat_eq_iff {n : Nat} {x : UInt64} (hn : n < 2 ^ 64) :
     UInt64.ofNat n = x ↔ n = x.toNat := by
@@ -83,3 +89,20 @@ theorem ldrb_cmp_and_eq_iff (b : UInt8) (x : UInt64) :
   generalize x.toBitVec = w
   simp only [BitVec.zero_eq, UInt64.toBitVec_ofNat]
   bv_decide
+
+/-- The value of `csel x0, y, z, ne` after `cmp w3, w1`, where `ldrb` loaded
+the byte `b` into `w3` and `and w1, w1, #0xff` truncated `x` to its low
+byte. -/
+theorem csel_ne_ldrb_cmp_and (b : UInt8) (x y z : UInt64) :
+    (if (!BitVec.extractLsb' 0 32 (BitVec.zeroExtend 64
+          (BitVec.zeroExtend 32 b.toBitVec)) -
+          BitVec.extractLsb' 0 32 (x &&& 255).toBitVec ==
+        BitVec.zero 32) = true then y.toBitVec else z.toBitVec) =
+      (if b = x.toUInt8 then z else y).toBitVec := by
+  by_cases hb : b = x.toUInt8
+  · have := (ldrb_cmp_and_eq_iff b x).mpr hb
+    rw [ite_eq_right (by simp only [this, beq_self_eq_true]; decide),
+      ite_eq_left hb]
+  · have := mt (ldrb_cmp_and_eq_iff b x).mp hb
+    rw [ite_eq_left (by simpa only [Bool.not_eq_true', beq_eq_false_iff_ne]),
+      ite_eq_right hb]

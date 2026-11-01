@@ -28,3 +28,5 @@ import ADTF.AtfLibc.Strlen
 import ADTF.AtfLibc.Strnlen
 import ADTF.AtfLibc.StrnlenSecure
 import ADTF.AtfLibc.Memchr
+import ADTF.AtfLibc.Strchr
+import ADTF.AtfLibc.Strrchr
