@@ -15,37 +15,6 @@ Trusted base: as in `ADTF.AtfLibc.Strlen`.
 /-- The instructions of `strrchr` in ATF's `strrchr.o`. -/
 def strrchr_o : List Instr := objdumpAArch64(strrchr_o_dump)
 
-/-- `x0` points to the last occurrence of `c` among the first `n` bytes at
-`base`, or is the null pointer if there is none. -/
-def IsLastMatch (bs : List UInt8) (c : UInt8) (base : UInt64) (n : Nat)
-    (x0 : UInt64) : Prop :=
-  (x0 = 0 ∧ ∀ i < n, bs[i]? ≠ some c) ∨
-  ∃ j < n, bs[j]? = some c ∧ x0 = base + .ofNat j ∧
-    ∀ i < n, j < i → bs[i]? ≠ some c
-
-theorem IsLastMatch.zero (bs : List UInt8) (c : UInt8) (base : UInt64) :
-    IsLastMatch bs c base 0 0 :=
-  .inl ⟨rfl, fun _ h => absurd h (Nat.not_lt_zero _)⟩
-
-theorem IsLastMatch.succ_eq {bs : List UInt8} {c : UInt8} {base : UInt64}
-    {n : Nat} (hn : n < bs.length) (hc : bs[n] = c) :
-    IsLastMatch bs c base (n + 1) (base + .ofNat n) :=
-  .inr ⟨n, by omega, by simp [hn, hc], rfl, fun i hi hni => by omega⟩
-
-theorem IsLastMatch.succ_ne {bs : List UInt8} {c : UInt8} {base : UInt64}
-    {n : Nat} {x0 : UInt64} (h : IsLastMatch bs c base n x0)
-    (hn : n < bs.length) (hc : bs[n] ≠ c) :
-    IsLastMatch bs c base (n + 1) x0 := by
-  rcases h with ⟨h0, hz⟩ | ⟨j, hj, hjc, hx, hz⟩
-  · refine .inl ⟨h0, fun i hi => ?_⟩
-    rcases Nat.lt_succ_iff_lt_or_eq.mp hi with hi | rfl
-    · exact hz i hi
-    · simp [hn, hc]
-  · refine .inr ⟨j, by omega, hjc, hx, fun i hi hji => ?_⟩
-    rcases Nat.lt_succ_iff_lt_or_eq.mp hi with hi | rfl
-    · exact hz i hi hji
-    · simp [hn, hc]
-
 /-- `strrchr` returns the address of the last occurrence of the low byte of
 `x1` in the bytes at `x0` up to and including the first 0, at index `r`, or
 the null pointer if there is none. It changes only `x0`, `x1` (to its low

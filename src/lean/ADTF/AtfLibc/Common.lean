@@ -24,6 +24,8 @@ theorem ofInt_toNat64 (x : BitVec 64) :
     BitVec.ofInt 64 (x.toNat : Int) = x := by
   simp
 
+theorem ofNat_zero_or64 (x : BitVec 64) : 0#64 ||| x = x := BitVec.zero_or
+
 /-- Rewrites the byte loads of an instruction's effects with
 `MachineData.load_byte_of_sep64 h_mem hw`, for the separation-logic
 hypothesis `h_mem` and the length bound `hw` of the bytes. The index has to
@@ -32,14 +34,14 @@ macro "load_byte" h_mem:term:max hw:term:max : tactic => `(tactic|
   simp (disch := first | rfl | omega | (simp; omega)) only [UInt64.toBitVec_add,
     UInt64.toBitVec_ofNat', MachineData.load_byte_of_sep64 $h_mem $hw,
     MachineData.load_byte_of_sep64_zero $h_mem $hw, ofInt_toNat64,
-    Effects.All])
+    ofNat_zero_or64, Effects.All])
 
 /-- Proves an equality of two `UInt64`s by `bv_decide` on their bit vectors,
 with `UInt64.ofNat` of a sum split up. -/
 macro "uint64_eq" : tactic => `(tactic| (
   apply UInt64.toBitVec_inj.mp
-  simp only [UInt64.toBitVec_add, UInt64.ofNat_add, UInt64.toBitVec_ofNat',
-    UInt64.toBitVec_ofNat]
+  simp only [UInt64.toBitVec_add, UInt64.toBitVec_sub, UInt64.ofNat_add,
+    UInt64.ofNat_toNat, UInt64.toBitVec_ofNat', UInt64.toBitVec_ofNat]
   bv_decide))
 
 /-- Proves `d = { s0 with ... }` for a state `d` that the beacons computed,
@@ -106,3 +108,34 @@ theorem csel_ne_ldrb_cmp_and (b : UInt8) (x y z : UInt64) :
   · have := mt (ldrb_cmp_and_eq_iff b x).mp hb
     rw [ite_eq_left (by simpa only [Bool.not_eq_true', beq_eq_false_iff_ne]),
       ite_eq_right hb]
+
+/-- `x0` points to the last occurrence of `c` among the first `n` bytes at
+`base`, or is the null pointer if there is none. -/
+def IsLastMatch (bs : List UInt8) (c : UInt8) (base : UInt64) (n : Nat)
+    (x0 : UInt64) : Prop :=
+  (x0 = 0 ∧ ∀ i < n, bs[i]? ≠ some c) ∨
+  ∃ j < n, bs[j]? = some c ∧ x0 = base + .ofNat j ∧
+    ∀ i < n, j < i → bs[i]? ≠ some c
+
+theorem IsLastMatch.zero (bs : List UInt8) (c : UInt8) (base : UInt64) :
+    IsLastMatch bs c base 0 0 :=
+  .inl ⟨rfl, fun _ h => absurd h (Nat.not_lt_zero _)⟩
+
+theorem IsLastMatch.succ_eq {bs : List UInt8} {c : UInt8} {base : UInt64}
+    {n : Nat} (hn : n < bs.length) (hc : bs[n] = c) :
+    IsLastMatch bs c base (n + 1) (base + .ofNat n) :=
+  .inr ⟨n, by omega, by simp [hn, hc], rfl, fun i hi hni => by omega⟩
+
+theorem IsLastMatch.succ_ne {bs : List UInt8} {c : UInt8} {base : UInt64}
+    {n : Nat} {x0 : UInt64} (h : IsLastMatch bs c base n x0)
+    (hn : n < bs.length) (hc : bs[n] ≠ c) :
+    IsLastMatch bs c base (n + 1) x0 := by
+  rcases h with ⟨h0, hz⟩ | ⟨j, hj, hjc, hx, hz⟩
+  · refine .inl ⟨h0, fun i hi => ?_⟩
+    rcases Nat.lt_succ_iff_lt_or_eq.mp hi with hi | rfl
+    · exact hz i hi
+    · simp [hn, hc]
+  · refine .inr ⟨j, by omega, hjc, hx, fun i hi hji => ?_⟩
+    rcases Nat.lt_succ_iff_lt_or_eq.mp hi with hi | rfl
+    · exact hz i hi hji
+    · simp [hn, hc]

@@ -30,3 +30,4 @@ import ADTF.AtfLibc.StrnlenSecure
 import ADTF.AtfLibc.Memchr
 import ADTF.AtfLibc.Strchr
 import ADTF.AtfLibc.Strrchr
+import ADTF.AtfLibc.Memrchr
