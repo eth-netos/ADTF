@@ -1,8 +1,8 @@
 module
 
-import ADTF.AtfLibc.Listing.strtoul_o
-import ADTF.AtfLibc.Common
-import Kraken.AArch64.Objdump
+public import ADTF.AtfLibc.Listing.strtoul_o
+public import ADTF.AtfLibc.Common
+public import Kraken.AArch64.Objdump
 
 open Kraken.AArch64.Parser Kraken.AArch64.Beacon
 
@@ -11,6 +11,8 @@ open Kraken.AArch64.Parser Kraken.AArch64.Beacon
 
 Trusted base: as in `ADTF.AtfLibc.Strlen`.
 -/
+
+@[expose] public section
 
 /-- The instructions of `strtoul` in ATF's `strtoul.o`. -/
 def strtoul_o : List Instr := objdumpAArch64(strtoul_o_dump)
