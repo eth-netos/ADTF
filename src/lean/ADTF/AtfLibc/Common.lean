@@ -236,3 +236,88 @@ macro "store_byte" h_mem:term:max : tactic => `(tactic|
   simp (disch := first | rfl | omega | (simp; omega)) only
     [UInt64.toBitVec_add, UInt64.toBitVec_ofNat', ofInt_toNat64,
       ldrb_strb_byte, MachineData.store_byte_of_sep64 $h_mem, Effects.All])
+
+/-- Setting byte `n` of a buffer whose first `n` bytes are `c` to `c`. -/
+theorem List.set_replicate_append_drop {b : List UInt8} {n : Nat}
+    (c : UInt8) (hb : n < b.length) :
+    (List.replicate n c ++ b.drop n).set n c =
+      List.replicate (n + 1) c ++ b.drop (n + 1) := by
+  rw [List.set_append_right _ _ (by simp), List.length_replicate, Nat.sub_self,
+    List.drop_eq_getElem_cons hb, List.set_cons_zero, List.replicate_succ',
+    List.append_assoc]
+  rfl
+
+/-- The value of 8 bytes `c`. -/
+theorem Int.ofBytes_replicate_eight (c : UInt8) :
+    Int.ofBytes (List.replicate 8 c) =
+      ((c.toNat * 0x101010101010101 : Nat) : Int) := by
+  simp only [Int.ofBytes, List.replicate, List.foldr]
+  omega
+
+/-- The doubleword whose 8 bytes are `c`, as `memset` computes it with
+`mul`. -/
+theorem fill_toNat (c : UInt8) :
+    (c.toBitVec.zeroExtend 64 * 0x101010101010101#64).toNat =
+      c.toNat * 0x101010101010101 := by
+  have hc := c.toBitVec.isLt
+  rw [BitVec.toNat_mul, BitVec.toNat_setWidth, BitVec.toNat_ofNat,
+    Nat.mod_eq_of_lt (a := c.toBitVec.toNat) (by omega),
+    Nat.mod_eq_of_lt (by omega), Nat.mod_eq_of_lt (by omega)]
+  rfl
+
+theorem BitVec.toInt_take_eq_toNat (x : BitVec 64) :
+    x.toInt.take (8 * 8) = x.toNat := by
+  have := x.isLt
+  rw [Int.take, BitVec.toInt_eq_toNat_cond]
+  split
+  · exact Int.emod_eq_of_lt (by omega) (by omega)
+  · simp only [Nat.reduceMul, Int.reducePow, Nat.reducePow]
+    omega
+
+/-- The bytes of the doubleword of `fill_toNat` are 8 bytes `c`. -/
+theorem Int.toBytes_fill (c : UInt8) :
+    Int.toBytes 8 (c.toBitVec.zeroExtend 64 * 0x101010101010101#64).toInt =
+      List.replicate 8 c := by
+  rw [← Int.toBytes_emod, BitVec.toInt_take_eq_toNat, fill_toNat,
+    ← Int.ofBytes_replicate_eight]
+  have := Int.toBytes_ofBytes_all (List.replicate 8 c)
+  rw [List.length_replicate] at this
+  exact this
+
+/-- Storing 8 bytes `c` at offset `k` of a buffer whose first `k` bytes are
+`c`. -/
+theorem List.replicate_append_drop_store {b : List UInt8} {k : Nat}
+    (c : UInt8) :
+    (List.replicate k c ++ b.drop k).take k ++ List.replicate 8 c ++
+      (List.replicate k c ++ b.drop k).drop (k + 8) =
+      List.replicate (k + 8) c ++ b.drop (k + 8) := by
+  rw [← List.replicate_append_replicate]
+  simp [List.drop_append, List.drop_drop]
+
+/-- Rounding `r` down to a multiple of 8 gives `q`, if `q` is that multiple.
+-/
+theorem and_neg8_eq {r : BitVec 64} {q : Nat} (hq8 : q % 8 = 0)
+    (h1 : q ≤ r.toNat) (h2 : r.toNat - q ≤ 7) :
+    r &&& (-8 : Int64).toBitVec = BitVec.ofNat 64 q := by
+  have e : (-8 : Int64).toBitVec = 0xfffffffffffffff8#64 := by decide
+  have hs : r &&& 0xfffffffffffffff8#64 = r - (r &&& 7#64) := by bv_decide
+  have hl : r &&& 7#64 ≤ r := by bv_decide
+  have h7 : (r &&& 7#64).toNat = r.toNat % 8 := by
+    rw [BitVec.toNat_and]
+    exact Nat.and_two_pow_sub_one_eq_mod _ 3
+  have := r.isLt
+  apply BitVec.eq_of_toNat_eq
+  rw [e, hs, BitVec.toNat_sub_of_le hl, h7, BitVec.toNat_ofNat]
+  omega
+
+/-- The condition `hi` after `cmp r, k`: `r` is above `k`, unsigned. -/
+theorem cmp_hi_iff (r : BitVec 64) (k : BitVec 64) :
+    ((↑(r - k).toNat : Int) == ↑r.toNat - ↑k.toNat &&
+      !(r - k == BitVec.zero 64)) = true ↔ k.toNat < r.toNat := by
+  simp only [Bool.and_eq_true, beq_iff_eq, Bool.not_eq_true',
+    beq_eq_false_iff_ne, ne_eq, BitVec.zero_eq]
+  constructor
+  · rintro ⟨h1, h2⟩
+    bv_omega
+  · intro h
+    constructor <;> bv_omega
