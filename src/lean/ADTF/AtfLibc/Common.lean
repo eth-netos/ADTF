@@ -139,3 +139,40 @@ theorem IsLastMatch.succ_ne {bs : List UInt8} {c : UInt8} {base : UInt64}
     rcases Nat.lt_succ_iff_lt_or_eq.mp hi with hi | rfl
     · exact hz i hi hji
     · simp [hn, hc]
+
+/-- The value of `sub w0, w3, w5` after `ldrb` loaded the bytes `a` into `w3`
+and `b` into `w5`: the difference of the bytes as a 32-bit integer (see
+`byteDiff_toInt`), zero-extended to 64 bits. -/
+def byteDiff (a b : UInt8) : UInt64 :=
+  ⟨(a.toBitVec.zeroExtend 32 - b.toBitVec.zeroExtend 32).zeroExtend 64⟩
+
+theorem byteDiff_toInt (a b : UInt8) :
+    ((byteDiff a b).toBitVec.extractLsb' 0 32).toInt =
+      (a.toNat : Int) - b.toNat := by
+  have ha := a.toNat_lt
+  have hb := b.toNat_lt
+  simp only [byteDiff, BitVec.toInt_eq_toNat_bmod, BitVec.extractLsb'_toNat,
+    BitVec.toNat_setWidth, BitVec.toNat_sub, UInt8.toNat_toBitVec]
+  rw [Int.bmod_def]
+  split <;> omega
+
+/-- The condition of `b.eq` after `cmp` of two registers into which `ldrb`
+loaded the bytes `a` and `b`. -/
+theorem ldrb_cmp_ldrb_eq_iff (a b : UInt8) :
+    BitVec.extractLsb' 0 32 (BitVec.zeroExtend 64
+      (BitVec.zeroExtend 32 a.toBitVec)) -
+      BitVec.extractLsb' 0 32 (BitVec.zeroExtend 64
+        (BitVec.zeroExtend 32 b.toBitVec)) = BitVec.zero 32 ↔ a = b := by
+  rw [← UInt8.toBitVec_inj]
+  generalize a.toBitVec = v
+  generalize b.toBitVec = w
+  simp only [BitVec.zero_eq]
+  bv_decide
+
+/-- The address of a load from `x - 1 + (y + 1)`. -/
+theorem sub_one_add_add_one (x : UInt64) (y : BitVec 64) :
+    (x - 1).toBitVec + (y + 1) = x.toBitVec + y := by
+  rw [UInt64.toBitVec_sub]
+  generalize x.toBitVec = v
+  simp only [UInt64.toBitVec_one]
+  bv_decide
