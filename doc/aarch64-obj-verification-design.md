@@ -131,7 +131,9 @@ These are 21 instructions in one object file, enough to build and test
 the whole path: listings, elaborator, script, beacons, memory reasoning
 for a 112-byte buffer.
 
-Later, next: the other 20, which loop. Sizes are in instructions:
+Then: the other 20, which loop. All 20 are now proven with `loop_rule`
+(`doc/loop-rule.md`), in `src/lean/ADTF/AtfLibc/`. Sizes are in
+instructions:
 
 - `strlen` (7): the simplest loop; precondition: a NUL-terminated string.
 - Read-only searches: `strnlen` (9), `strnlen_secure` (10), `memchr` (11),
@@ -149,7 +151,7 @@ Later, next: the other 20, which loop. Sizes are in instructions:
 - `unsigned_num_print` (76, static, in `snprintf.o`): number to digits with
   `udiv` and `msub`, into a buffer.
 
-They need a loop rule, branch targets (section 4.8) and conditional
+They needed a loop rule, branch targets (section 4.8) and conditional
 branches in the beacon tactic. Suggested order, each adding one thing:
 `strlen` (a loop that ends on data), `memcpy` (writes, two buffers),
 `memcmp` (a result computed from two buffers), `memset` (alignment, words,

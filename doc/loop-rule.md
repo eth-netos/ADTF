@@ -224,5 +224,10 @@ well.
 
 ## Next steps
 
-- Use `loop_rule` on `strlen` and `memchr` once branches work in the
-  beacon tactic (point 6). No proof uses it on real code yet.
+- Done: `loop_rule` proves the loops of all 20 looping functions of ATF's
+  libc in `src/lean/ADTF/AtfLibc/`, from `strlen` to `unsigned_num_print`,
+  whose four consecutive loops are four uses of the rule, composed with
+  `eventually_trans`.
+- A rule that frames the unchanged parts of the state automatically
+  (point 7) would shorten the invariants, which are the longest part of
+  these proofs.
