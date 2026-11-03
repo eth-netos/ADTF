@@ -11,5 +11,4 @@ name = "ADTF"
 
 [[require]]
 name = "Kraken"
-git = "https://github.com/AeneasVerif/kraken.git"
-rev = "7bdfa42044024b6406a1ab25f6a890b8768f3757"
+path = "../../kraken"

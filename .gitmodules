@@ -1,3 +1,10 @@
 [submodule "sockeye"]
 	path = sockeye
 	url = https://gitlab.inf.ethz.ch/project-opensockeye/sockeye.git
+[submodule "kraken"]
+	path = kraken
+	url = https://github.com/AeneasVerif/kraken.git
+[submodule "imx-atf"]
+	path = imx-atf
+	url = https://github.com/nxp-imx/imx-atf.git
+	branch = lf_v2.14
