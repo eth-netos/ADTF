@@ -1,8 +1,9 @@
 module
 
-import ADTF.AtfLibc.Listing.strlen_o
+public import ADTF.AtfLibc.Listing.strlen_o
 import ADTF.AtfLibc.Common
 import Kraken.AArch64.Objdump
+public import Kraken.AArch64.BeaconCall
 
 open Kraken.AArch64.Parser Kraken.AArch64.Beacon
 
@@ -15,11 +16,11 @@ addresses relative to the symbol `strlen`, whose address is a hypothesis
 -/
 
 /-- The instructions of `strlen` in ATF's `strlen.o`. -/
-def strlen_o : List Instr := objdumpAArch64(strlen_o_dump)
+public def strlen_o : List Instr := objdumpAArch64(strlen_o_dump)
 
 /-- `strlen` returns the length of the NUL-terminated string at `x0`. It
 changes only `x0`, `x1` and `x2`. -/
-theorem strlen_spec [Labels] (code : Code) (strlen : Int64)
+theorem strlen_correct [Labels] (code : Code) (strlen : Int64)
     (h : Loaded code strlen strlen_o) (h_sym : label "strlen" = strlen)
     (s0 : MachineData) (str : List UInt8) (R : DataMem → Prop)
     (h_nz : 0 ∉ str) (h_len : str.length < 2 ^ 64)
@@ -72,3 +73,24 @@ theorem strlen_spec [Labels] (code : Code) (strlen : Int64)
     congr 1
     · uint64_eq
     · rw [h_b]; rfl
+
+/-- `strlen` returns the length of the NUL-terminated string `str` at `x0`,
+under the generic calling convention, and changes no memory. -/
+@[expose] public def strlen_spec [Labels] (code : Code) (strlen : Int64) : Prop :=
+  ∀ (p : UInt64) (str : List UInt8) (R : DataMem → Prop),
+    CallSpec code strlen
+      (fun regs m => regs.X0 = p ∧ 0 ∉ str ∧ str.length < 2 ^ 64 ∧
+        m =⋆ Eq ((str ++ [0]).At p.toBitVec) ⋆ R)
+      (fun regs m => regs.X0 = .ofNat str.length ∧
+        m =⋆ Eq ((str ++ [0]).At p.toBitVec) ⋆ R)
+
+public theorem strlen_ok [Labels] (code : Code) (strlen : Int64)
+    (h : Loaded code strlen strlen_o) (h_sym : label "strlen" = strlen) :
+    strlen_spec code strlen := by
+  rintro p str R s0 - ⟨rfl, h_nz, h_len, h_mem⟩
+  refine eventually_weaken _ _ _ _ ?_
+    (strlen_correct code strlen h h_sym s0 str R h_nz h_len h_mem)
+  rintro s ⟨hpc, hregs, -, hdmem⟩
+  rw [hregs, hdmem]
+  exact ⟨hpc, ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+    rfl⟩, rfl, h_mem⟩

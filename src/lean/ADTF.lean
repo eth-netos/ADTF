@@ -10,6 +10,8 @@ import ADTF.AtfLibc.Listing.memrchr_o
 import ADTF.AtfLibc.Listing.memset_o
 import ADTF.AtfLibc.Listing.strchr_o
 import ADTF.AtfLibc.Listing.strcmp_o
+import ADTF.AtfLibc.Listing.strcpy_secure_o
+import ADTF.AtfLibc.Listing.strlcat_o
 import ADTF.AtfLibc.Listing.strlcpy_o
 import ADTF.AtfLibc.Listing.strlen_o
 import ADTF.AtfLibc.Listing.strncmp_o
@@ -27,6 +29,7 @@ import ADTF.AtfLibc.Common
 import ADTF.AtfLibc.Strlen
 import ADTF.AtfLibc.Strnlen
 import ADTF.AtfLibc.StrnlenSecure
+import ADTF.AtfLibc.StrcpySecure
 import ADTF.AtfLibc.Memchr
 import ADTF.AtfLibc.Strchr
 import ADTF.AtfLibc.Strrchr

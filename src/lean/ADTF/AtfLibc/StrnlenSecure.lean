@@ -1,8 +1,9 @@
 module
 
-import ADTF.AtfLibc.Listing.strnlen_secure_o
+public import ADTF.AtfLibc.Listing.strnlen_secure_o
 import ADTF.AtfLibc.Common
 import Kraken.AArch64.Objdump
+public import Kraken.AArch64.BeaconCall
 
 open Kraken.AArch64.Parser Kraken.AArch64.Beacon
 
@@ -13,13 +14,13 @@ Trusted base: as in `ADTF.AtfLibc.Strlen`.
 -/
 
 /-- The instructions of `strnlen_secure` in ATF's `strnlen_secure.o`. -/
-def strnlen_secure_o : List Instr := objdumpAArch64(strnlen_secure_o_dump)
+public def strnlen_secure_o : List Instr := objdumpAArch64(strnlen_secure_o_dump)
 
 /-- `strnlen_secure` returns 0 if `x0` is the null pointer, and otherwise
 the same as `strnlen`: the index `r` of the first 0 in the bytes at `x0`, or
 `x1` if there is none among the first `x1` bytes. It changes only `x0`, `x2`,
 `x3` and the flags. -/
-theorem strnlen_secure_spec [Labels] (code : Code) (strnlen_secure : Int64)
+theorem strnlen_secure_correct [Labels] (code : Code) (strnlen_secure : Int64)
     (h : Loaded code strnlen_secure strnlen_secure_o)
     (h_sym : label "strnlen_secure" = strnlen_secure)
     (s0 : MachineData) (bs : List UInt8) (R : DataMem → Prop)
@@ -99,3 +100,31 @@ theorem strnlen_secure_spec [Labels] (code : Code) (strnlen_secure : Int64)
         instr "ret" at strnlen_secure + 0x1c
         exact .done _ (.inr ⟨rfl, n, fun h => absurd h hx,
           fun _ => ⟨hn, hz, .inr (by simp [hb, h_b])⟩, _, _, by state_eq⟩)
+
+/-- `strnlen_secure`, under the generic calling convention, with the result
+in `x0` as in `strnlen_secure_correct`. It changes no memory. -/
+@[expose] public def strnlen_secure_spec [Labels] (code : Code) (strnlen_secure : Int64) :
+    Prop :=
+  ∀ (p n : UInt64) (bs : List UInt8) (R : DataMem → Prop),
+    CallSpec code strnlen_secure
+      (fun regs m => regs.X0 = p ∧ regs.X1 = n ∧
+        (n.toNat ≤ bs.length ∨ 0 ∈ bs) ∧ bs.length ≤ 2 ^ 64 ∧
+        m =⋆ Eq (bs.At p.toBitVec) ⋆ R)
+      (fun regs m => (∃ r, regs.X0 = .ofNat r ∧
+        (p = 0 → r = 0) ∧
+        (p ≠ 0 → r ≤ n.toNat ∧ (∀ i < r, bs[i]? ≠ some 0) ∧
+          (r = n.toNat ∨ bs[r]? = some 0))) ∧
+        m =⋆ Eq (bs.At p.toBitVec) ⋆ R)
+
+public theorem strnlen_secure_ok [Labels] (code : Code) (strnlen_secure : Int64)
+    (h : Loaded code strnlen_secure strnlen_secure_o)
+    (h_sym : label "strnlen_secure" = strnlen_secure) :
+    strnlen_secure_spec code strnlen_secure := by
+  rintro p n bs R s0 - ⟨rfl, rfl, h_bs, h_len, h_mem⟩
+  refine eventually_weaken _ _ _ _ ?_
+    (strnlen_secure_correct code strnlen_secure h h_sym s0 bs R h_bs h_len
+      h_mem)
+  rintro s ⟨hpc, r, h0, h1, x3, st, hs⟩
+  rw [hs]
+  exact ⟨hpc, ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+    rfl⟩, ⟨r, rfl, h0, h1⟩, h_mem⟩
