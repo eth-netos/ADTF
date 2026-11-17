@@ -353,3 +353,16 @@ theorem MachineData.store_of_sep64_zero {d : DataMem} {bs : List UInt8}
       require_write_access a w (fun _ =>
         ret { s with dmem := Mem.storeInt d a w.bytes v.toInt }) := by
   simpa using MachineData.store_of_sep64 h s 0 v ret hd (by omega)
+
+theorem ofNat_toBitVec_eq_zero {k : Nat} (hk : k < 2 ^ 64)
+    (h : (UInt64.ofNat k).toBitVec = 0) : k = 0 := by
+  have := congrArg BitVec.toNat h
+  rwa [UInt64.toBitVec_ofNat', BitVec.toNat_ofNat, Nat.mod_eq_of_lt hk]
+    at this
+
+/-- A register after `sub x, x, #0x1`, e.g. a count down. -/
+theorem ofNat_succ_sub_one (j : Nat) :
+    UInt64.ofBitVec ((UInt64.ofNat (j + 1)).toBitVec - 1) = UInt64.ofNat j := by
+  apply UInt64.toBitVec_inj.mp
+  rw [UInt64.toBitVec_ofNat', UInt64.toBitVec_ofNat', BitVec.ofNat_add]
+  exact BitVec.add_sub_cancel _ _

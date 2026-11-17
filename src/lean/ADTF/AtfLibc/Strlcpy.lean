@@ -70,7 +70,7 @@ theorem strlcpy_scan [Labels] (code : Code) (strlcpy : Int64)
 /-- The destination buffer `old` after `strlcpy` copied the string `str`
 into it: as much of `str` as fits, followed by a 0, unless `old` is
 empty. -/
-def strlcpyDst (str old : List UInt8) : List UInt8 :=
+@[expose] public def strlcpyDst (str old : List UInt8) : List UInt8 :=
   if old = [] then [] else
     str.take (min str.length (old.length - 1)) ++
       0 :: old.drop (min str.length (old.length - 1) + 1)

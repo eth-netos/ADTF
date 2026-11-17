@@ -6,11 +6,13 @@ import ADTF.AtfLibc.Listing.memcmp_o
 import ADTF.AtfLibc.Listing.strlen_o
 import ADTF.AtfLibc.Listing.strnlen_o
 import ADTF.AtfLibc.Listing.strnlen_secure_o
+import ADTF.AtfLibc.Listing.strcpy_secure_o
 import ADTF.AtfLibc.Listing.strcmp_o
 import ADTF.AtfLibc.Listing.strncmp_o
 import ADTF.AtfLibc.Listing.strchr_o
 import ADTF.AtfLibc.Listing.strrchr_o
 import ADTF.AtfLibc.Listing.strlcpy_o
+import ADTF.AtfLibc.Listing.strlcat_o
 import ADTF.AtfLibc.Listing.strtok_r_o
 import ADTF.AtfLibc.Listing.swapfunc_o
 import ADTF.AtfLibc.Listing.setjmp_o
@@ -47,11 +49,13 @@ def instrCounts : List (String × Nat) := [
   ("strlen", (objdumpAArch64(strlen_o_dump)).length),
   ("strnlen", (objdumpAArch64(strnlen_o_dump)).length),
   ("strnlen_secure", (objdumpAArch64(strnlen_secure_o_dump)).length),
+  ("strcpy_secure", (objdumpAArch64(strcpy_secure_o_dump)).length),
   ("strcmp", (objdumpAArch64(strcmp_o_dump)).length),
   ("strncmp", (objdumpAArch64(strncmp_o_dump)).length),
   ("strchr", (objdumpAArch64(strchr_o_dump)).length),
   ("strrchr", (objdumpAArch64(strrchr_o_dump)).length),
   ("strlcpy", (objdumpAArch64(strlcpy_o_dump)).length),
+  ("strlcat", (objdumpAArch64(strlcat_o_dump)).length),
   ("strtok_r", (objdumpAArch64(strtok_r_o_dump)).length),
   ("swapfunc", (objdumpAArch64(swapfunc_o_dump)).length),
   ("setjmp", (objdumpAArch64(setjmp_o_dump)).length),

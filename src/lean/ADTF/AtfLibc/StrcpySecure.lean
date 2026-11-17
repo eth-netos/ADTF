@@ -135,19 +135,6 @@ theorem strcpy_secure_epilogue [Labels] (code : Code) (strcpy_secure : Int64)
     ← Std.ExtHashMap.sep_assoc] at hm'
   exact hm'
 
-theorem ofNat_toBitVec_eq_zero {k : Nat} (hk : k < 2 ^ 64)
-    (h : (UInt64.ofNat k).toBitVec = 0) : k = 0 := by
-  have := congrArg BitVec.toNat h
-  rwa [UInt64.toBitVec_ofNat', BitVec.toNat_ofNat, Nat.mod_eq_of_lt hk]
-    at this
-
-/-- `x0` after `sub x0, x0, #0x1`. -/
-theorem ofNat_succ_sub_one (j : Nat) :
-    UInt64.ofBitVec ((UInt64.ofNat (j + 1)).toBitVec - 1) = UInt64.ofNat j := by
-  apply UInt64.toBitVec_inj.mp
-  rw [UInt64.toBitVec_ofNat', UInt64.toBitVec_ofNat', BitVec.ofNat_add]
-  exact BitVec.add_sub_cancel _ _
-
 /-- After copying the bytes of `b` from `n + 1` on over `a`, copying byte
 `n` too. -/
 theorem List.set_take_succ_append_drop {a b : List UInt8} {n : Nat}

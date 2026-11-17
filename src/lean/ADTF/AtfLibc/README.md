@@ -17,11 +17,13 @@ listing in `Listing/` (via the hypothesis `Loaded code f foo_o`).
 | strlen | strlen.o | 7 |
 | strnlen | strnlen.o | 9 |
 | strnlen_secure | strnlen_secure.o | 10 |
+| strcpy_secure | strcpy_secure.o | 29 |
 | strcmp | strcmp.o | 11 |
 | strncmp | strncmp.o | 14 |
 | strchr | strchr.o | 9 |
 | strrchr | strrchr.o | 10 |
 | strlcpy | strlcpy.o | 15 |
+| strlcat | strlcat.o | 34 |
 | strtok_r | strtok.o | 29 |
 | swapfunc | qsort.o | 9 |
 | setjmp | setjmp.o | 10 |
@@ -31,9 +33,9 @@ listing in `Listing/` (via the hypothesis `Loaded code f foo_o`).
 | strtol | strtol.o | 101 |
 | strtoll | strtoll.o | 101 |
 | unsigned_num_print | snprintf.o | 76 |
-| **Total** | | **697** |
+| **Total** | | **760** |
 
-The 20 functions with loops account for 676 instructions, `setjmp` and
+The 22 functions with loops account for 739 instructions, `setjmp` and
 `longjmp` (which have no loops) for 21. The other functions in the same
 object files (e.g. the rest of `qsort.o` and `snprintf.o`) are not verified
 and not counted.
@@ -53,9 +55,12 @@ and not counted.
 
 - Every address in these lists is symbolically executed by at least one
   `instr "..." at ...` in the proofs, whose string matches the listing at
-  that address, so no listed instruction is left unverified. There are 788
+  that address, so no listed instruction is left unverified. There are 857
   `instr` steps in total: instructions after a join point (e.g. a shared
   `ret`, or the counter update of `CHECK_AND_PUT_CHAR` in
   `unsigned_num_print`) are stepped once per incoming path, and the three
   `strtok_r` specifications each step the entry sequence. No instruction is
-  executed by any other means than the `instr` tactic.
+  executed by any other means than the `instr` tactic. A `bl` in
+  `strcpy_secure` (to `strnlen_secure`) or `strlcat` (to `strlen`) continues
+  with the callee's specification (`CallSpec.apply`), so the callee's
+  instructions are counted only in the callee's row.
