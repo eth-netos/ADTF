@@ -72,4 +72,6 @@ If a task only made changes in a submodule and the only change in the parent mod
 
 ### Invoking Lean
 
-Lean sometimes consumes unbounded amounts of RAM, which can block the whole system. Always invoke lean with memory bounds set by ulimit, and also set timeouts. Each individual command in a lean file should take at most a few seconds, and keep lean files small enough so that each lean file takes at most one minute to compile, or a few minutes if really needed.
+Lean sometimes consumes unbounded amounts of RAM, which can block the whole system. Always invoke lean with memory bounds set by ulimit, and also set timeouts.
+Each lean process should not take more than 1GB of RAM, or 2GB if really needed.
+Each individual command in a lean file should take at most a few seconds, and keep lean files small enough so that each lean file takes at most one minute to compile, or a few minutes if really needed.
