@@ -69,3 +69,7 @@ Commit messages often contain backticks and `$`, which the shell expands in doub
 
 Before committing, read `git status` to know what's going on, and pay attention to the submodules. If the changes you are about to commit depend on the contents of submodules, first make the necessary submodule commit(s). Then, in the parent repo, there should be no more "modified content" status, but maybe some "new commits" status for submodules. Also `git add` the submodules with changes relevant for the current commit, so that it is always clear from the git history against what submodule contents the parent's code was tested.
 If a task only made changes in a submodule and the only change in the parent module is that the hash of the submodule changed, do not make a commit in the parent module.
+
+### Invoking Lean
+
+Lean sometimes consumes unbounded amounts of RAM, which can block the whole system. Always invoke lean with memory bounds set by ulimit, and also set timeouts. Each individual command in a lean file should take at most a few seconds, and keep lean files small enough so that each lean file takes at most one minute to compile, or a few minutes if really needed.
