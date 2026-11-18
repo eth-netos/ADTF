@@ -9,37 +9,39 @@ devices are fixed (cf. `MachCSL/Dev/Fabric.lean`).
 * Left of the figure, "all of the state": `MState` holds every hart's
   registers, the shared memory and every device's state
   (`MachCSL.MState`). Harts and devices are threads of one language
-  (`MachCSL.Expr`: `hart`, `dev`, `power`).
+  (`MachCSL.Expr`: `hart`, `dev`, `power`): `hartSb` is a hart's step,
+  `diskDma` is the disk's step, which writes RAM by DMA.
 * Right of the figure, "proof over partial state": every piece of state is
-  a `Cell`. A `World` says which `Holder` holds each cell: a thread's proof,
-  an invariant, or nobody. This stands in for MachCSL's ghost state. The
-  register maps (`regPointsTo`), the memory heap (`genHeapInterp`) and the
-  device mirrors (`devAuthAt`/`devFragAt`) each have an authoritative part
-  in the state interpretation `machInterp σ`, which tracks `σ`, and
-  fragments that proofs and invariants hold. Here a holder's `view` reads
-  its cells' values from `σ`, so the fragments agree with the machine by
-  construction (Iris proves this with `ghost_map`/`ghost_var` agreement).
-  Since `holder` is a function, no two holders own the same cell, which is
-  separation.
-* A device is one `Cell.dev d` (in MachCSL, `devFrag d s`, a ghost
-  variable over the whole device state). xv6 keeps it in a per-device
-  invariant together with client ghost state (`devInvR`, e.g.
-  `Xv6.uartInv`): here `Holder.inv (.dev d)` and `Cell.ghost`.
-* An MMIO store opens the device invariant, applies the device model's
-  `write`, and must re-establish the invariant body, possibly with a ghost
-  update (`devWriteAU`, `swp_sail_mem_write_dev`): `hart_sb_uart_ok`. The
-  device thread's own steps must do the same (`wpDev_localO`):
-  `uart_step_ok`. A RAM store touches only cells its thread holds, so no
-  invariant is involved (the frame rule): `hart_sb_ram_ok`.
-* "CSL soundness" (adequacy) turns facts about the resources back into facts
-  about the real state: `uart_wire_prefix`.
+  a `Cell`, and an assertion holds of a footprint, the set of cells it owns.
+  `regPt`, `memPt` and `devPt` own one register, one byte and one whole
+  device, and `∗` splits a footprint into disjoint parts. So a device is a
+  resource of the same kind as a memory byte, and the two can be starred.
+* In MachCSL, these are Iris ghost resources whose authoritative parts sit
+  in the state interpretation, itself a star of all of them:
+  `eraInterp E st := regs ∗ genHeapInterp ∗ memModelAt ∗ devInterpAt`.
+  Proofs hold the fragments: `regPointsTo`, TSO points-to `pa ↦ H`, and
+  `devFrag d s`, a ghost variable over the whole state of device `d`.
+  Here an assertion instead reads its cells directly from the state,
+  so the fragments agree with the machine by construction.
+* A device's resource lives in an invariant, starred with whatever the
+  driver protocol needs: `devInvR N d R := inv N (∃ s, devFrag d s ∗ R s)`.
+  For the disk, xv6's `R` is `diskProto`, which stars, among ghost state,
+  the RAM of the virtio rings (`availLease`, `usedIdxCell`), because the
+  device thread reads and writes them by DMA. Here: `diskBody`.
+* Every step must preserve the invariant together with an arbitrary frame
+  `R` (all other threads' resources and invariants): the device thread
+  (`wpDev_localO`) in `disk_dma_ok`, and a hart's MMIO store, which opens
+  the invariant (`devWriteAU`, `swp_sail_mem_write_dev`), in
+  `hart_notify_ok`. A RAM store needs no invariant: `hart_ram_ok`.
+* "CSL soundness" turns resources back into facts about the real state:
+  `disk_buf_holds`.
 
 This toy leaves out TSO (MachCSL's memory is a log of writes with per-hart
-views), fractions, persistent resources, later modalities, masks, eras and
-power, and the PLIC wires.
+views), ghost state of the OS (files, processes), fractions, invariant
+masks and later modalities, eras and power, and the PLIC wires.
 -/
 
-namespace ToyRes
+namespace ToySep
 
 abbrev Byte := Nat
 abbrev Addr := Nat
@@ -56,14 +58,17 @@ inductive DevId where
   deriving DecidableEq
 
 structure UartSt where
-  /-- Bytes stored into the transmit register and not yet sent. -/
   tx : List Byte
-  /-- Bytes that left on the wire (observable, `Obs.dev`). -/
   wire : List Byte
+
+structure DiskSt where
+  /-- The driver has notified the disk, so a DMA transfer is due. -/
+  pending : Bool
+  block : Byte
 
 def DevSt : DevId → Type
   | .uart => UartSt
-  | .disk => Nat → Byte
+  | .disk => DiskSt
   | .plic => Nat → Bool
 
 structure MState where
@@ -73,260 +78,238 @@ structure MState where
 
 /-- The UART's transmit holding register. -/
 def uartThr : Addr := 0x10000000
+def diskNotify : Addr := 0x10001050
 def ramBase : Addr := 0x80000000
+/-- The RAM buffer that the disk fills by DMA. -/
+def diskBuf : Addr := 0x80001000
 
 def devDecode (a : Addr) : Option (DevId × Nat) :=
-  if a = uartThr then some (.uart, 0) else none
+  if a = uartThr then some (.uart, 0)
+  else if a = diskNotify then some (.disk, 0)
+  else none
 
 /-- The device models' MMIO stores (`DevSig.write`). -/
 def devWrite : (d : DevId) → DevSt d → Nat → Byte → Option (DevSt d)
-  | .uart, s, 0, b => some { s with tx := s.tx ++ [b] }
+  | .uart, s, 0, b => some (⟨s.tx ++ [b], s.wire⟩ : UartSt)
+  | .disk, s, 0, _ => some (⟨true, s.block⟩ : DiskSt)
   | _, _, _, _ => none
 
-def MState.setDev (σ : MState) (d : DevId) (s : DevSt d) : MState :=
-  { σ with devs := fun d' => if h : d' = d then h ▸ s else σ.devs d' }
+def MState.setDev (st : MState) (d : DevId) (s : DevSt d) : MState :=
+  { st with devs := fun e => if h : e = d then h ▸ s else st.devs e }
+
+def MState.setMem (st : MState) (a : Addr) (b : Byte) : MState :=
+  { st with mem := fun x => if x = a then b else st.mem x }
+
+def MState.setPc (st : MState) (cpu : CPU) (v : Nat) : MState :=
+  { st with regs := fun c r => if c = cpu ∧ r = .pc then v else st.regs c r }
 
 /-- A store on the bus (`MachCSL.evStep`, `memWrite`): MMIO or RAM. -/
-def MState.store (σ : MState) (a : Addr) (b : Byte) : Option MState :=
+def MState.store (st : MState) (a : Addr) (b : Byte) : Option MState :=
   match devDecode a with
-  | some (d, off) => (devWrite d (σ.devs d) off b).map (σ.setDev d)
-  | none =>
-    if ramBase ≤ a then
-      some { σ with mem := fun a' => if a' = a then b else σ.mem a' }
-    else none
+  | some (d, off) => (devWrite d (st.devs d) off b).map (st.setDev d)
+  | none => if ramBase ≤ a then some (st.setMem a b) else none
 
 /-- Hart `cpu` executes `sb a1, 0(a0)`. -/
-def hartSb (σ : MState) (cpu : CPU) : Option MState :=
-  (σ.store (σ.regs cpu .a0) (σ.regs cpu .a1)).map fun σ' =>
-    { σ' with regs := fun c r =>
-        if c = cpu ∧ r = .pc then σ.regs cpu .pc + 4 else σ'.regs c r }
+def hartSb (st : MState) (cpu : CPU) : Option MState :=
+  (st.store (st.regs cpu .a0) (st.regs cpu .a1)).map
+    (·.setPc cpu (st.regs cpu .pc + 4))
 
-/-- One step of the UART's thread: send the oldest pending byte. -/
-def uartSend (s : UartSt) : Option UartSt :=
-  match s.tx with
-  | b :: tx => some ⟨tx, s.wire ++ [b]⟩
-  | [] => none
+/-- One step of the disk's thread: copy the block into RAM by DMA. -/
+def diskDma (st : MState) : Option MState :=
+  let s : DiskSt := st.devs .disk
+  if s.pending then
+    some ((st.setMem diskBuf s.block).setDev .disk
+      (⟨false, s.block⟩ : DiskSt))
+  else none
 
-/-! ## Right of Figure 3: cells, holders and views -/
+/-! ## Right of Figure 3: resources and the separating star -/
 
 inductive Cell where
   | reg (c : CPU) (r : Reg)
   | mem (a : Addr)
   | dev (d : DevId)
-  /-- Logical state, e.g. files or processes; here byte lists. -/
-  | ghost (g : Nat)
+  deriving DecidableEq
 
 def CellVal : Cell → Type
   | .reg .. => Nat
   | .mem _ => Byte
   | .dev d => DevSt d
-  | .ghost _ => List Byte
 
-inductive InvName where
-  | dev (d : DevId)
-  | lock (a : Addr)
-  deriving DecidableEq
+def MState.val (st : MState) : (c : Cell) → CellVal c
+  | .reg c r => st.regs c r
+  | .mem a => st.mem a
+  | .dev d => st.devs d
 
-inductive Holder where
-  /-- The proof of a hart's or device's thread. -/
-  | thread (i : Nat)
-  | inv (n : InvName)
-  | nobody
-  deriving DecidableEq
+/-- A footprint (`Fp`): the cells that a resource owns. -/
+abbrev Fp := Cell → Bool
 
-structure World where
-  σ : MState
-  ghost : Nat → List Byte
-  holder : Cell → Holder
+def Fp.only (c : Cell) : Fp := fun e => decide (e = c)
+def Fp.union (m n : Fp) : Fp := fun c => m c || n c
+/-- Disjointness (`Disj`) of two footprints. -/
+def Fp.Disj (m n : Fp) : Prop := ∀ c, m c = true → n c = false
 
-def World.val (w : World) : (c : Cell) → CellVal c
-  | .reg c r => w.σ.regs c r
-  | .mem a => w.σ.mem a
-  | .dev d => w.σ.devs d
-  | .ghost g => w.ghost g
+/-- An assertion (`Assn`) holds of a footprint in a machine state. -/
+abbrev Assn := Fp → MState → Prop
 
-/-- What holder `h` owns: its cells, at their current values. -/
-abbrev Res := (c : Cell) → Option (CellVal c)
+def star (P Q : Assn) : Assn := fun m st =>
+  ∃ m1 m2, m1.Disj m2 ∧ m = m1.union m2 ∧ P m1 st ∧ Q m2 st
 
-def World.view (w : World) (h : Holder) : Res := fun c =>
-  if w.holder c = h then some (w.val c) else none
+infixr:35 " ∗ " => star
 
-/-- Assertions, e.g. a points-to `fun r => r (.mem a) = some v`. -/
-abbrev Assn := Res → Prop
+/-- `P` reads only the cells of its footprint. Every Iris resource
+predicate is local in this sense, so frames are assumed local. -/
+def Local (P : Assn) : Prop :=
+  ∀ m st1 st2, (∀ c, m c = true → st1.val c = st2.val c) →
+    P m st1 → P m st2
 
-/-- Every invariant's body holds of the cells it holds. -/
-def WorldOk (body : InvName → Assn) (w : World) : Prop :=
-  ∀ n, body n (w.view (.inv n))
+def regPt (c : CPU) (r : Reg) (v : Nat) : Assn := fun m st =>
+  m = .only (.reg c r) ∧ st.regs c r = v
 
-/-- A step that changes no cell of any invariant keeps the world valid. -/
-theorem frame_ok (body : InvName → Assn) (w w' : World)
-    (hh : w'.holder = w.holder)
-    (hval : ∀ c n, w.holder c = .inv n → w'.val c = w.val c)
-    (hok : WorldOk body w) : WorldOk body w' := by
-  intro n
-  have : w'.view (.inv n) = w.view (.inv n) := by
-    funext c
-    simp only [World.view, hh]
-    split
-    · next hc => rw [hval c n hc]
-    · rfl
-  rw [this]; exact hok n
+def memPt (a : Addr) (v : Byte) : Assn := fun m st =>
+  m = .only (.mem a) ∧ st.mem a = v
 
-/-- A step that changes only cells of thread `i` and of the invariant `n`
-it opened keeps the world valid if it re-establishes `n`'s body. The
-other invariants see no change. -/
-theorem step_ok (body : InvName → Assn) (w w' : World) (i : Nat)
-    (n : InvName) (hh : w'.holder = w.holder)
-    (hval : ∀ c, w.holder c ≠ .thread i → w.holder c ≠ .inv n →
-      w'.val c = w.val c)
-    (hok : WorldOk body w) (hn : body n (w'.view (.inv n))) :
-    WorldOk body w' := by
-  intro m
-  by_cases hm : m = n
-  · subst hm; exact hn
-  · have : w'.view (.inv m) = w.view (.inv m) := by
-      funext c
-      simp only [World.view, hh]
-      split
-      · next hc =>
-        rw [hval c (by rw [hc]; simp) (by rw [hc]; simp [hm])]
-      · rfl
-    rw [this]; exact hok m
+def devPt (d : DevId) (s : DevSt d) : Assn := fun m st =>
+  m = .only (.dev d) ∧ st.devs d = s
 
-/-! ## The UART invariant (cf. `Xv6.uartInv`) -/
+/-- The registers that `sb a1, 0(a0)` uses, owned by its hart's proof. -/
+def hartPt (cpu : CPU) (p x y : Nat) : Assn :=
+  regPt cpu .pc p ∗ regPt cpu .a0 x ∗ regPt cpu .a1 y
 
-/-- Ghost cell 0 is the console trace the kernel has written. -/
-def uartBody : Assn := fun r =>
-  ∃ (s : UartSt) (g : List Byte),
-    r (.dev .uart) = some s ∧ r (.ghost 0) = some g ∧ s.wire ++ s.tx = g
+/-- The frame rule: a step that turns `P` into `Q` on `P`'s cells and
+changes no other cell keeps every local frame `R`. -/
+theorem star_frame {P Q R : Assn} {m : Fp} {st st2 : MState}
+    (hR : Local R) (h : (P ∗ R) m st)
+    (hstep : ∀ m1, P m1 st →
+      Q m1 st2 ∧ ∀ c, m1 c = false → st2.val c = st.val c) :
+    (Q ∗ R) m st2 := by
+  obtain ⟨m1, m2, hd, rfl, hp, hr⟩ := h
+  obtain ⟨hq, hout⟩ := hstep m1 hp
+  refine ⟨m1, m2, hd, rfl, hq, hR m2 st st2 (fun c hc => ?_) hr⟩
+  cases h1 : m1 c
+  · exact (hout c h1).symm
+  · rw [hd c h1] at hc; cases hc
 
-/-- The UART invariant holds the UART and the console trace. -/
-def Layout (w : World) : Prop :=
-  w.holder (.dev .uart) = .inv (.dev .uart) ∧
-  w.holder (.ghost 0) = .inv (.dev .uart)
+/-! ## The disk invariant: a device starred with memory -/
 
-theorem view_inv (w : World) (n : InvName) (c : Cell)
-    (h : w.holder c = .inv n) : w.view (.inv n) c = some (w.val c) := by
-  simp [World.view, h]
+/-- The body of the disk invariant (cf. xv6's `diskInv`, which is
+`devInvR diskN .virtio (diskProto ..)`): the disk and its DMA buffer,
+starred together, and a protocol relating them. -/
+def diskBody : Assn := fun m st =>
+  ∃ (s : DiskSt) (v : Byte),
+    (devPt .disk s ∗ memPt diskBuf v) m st ∧
+    (s.pending = false → v = s.block)
+
+/-- The disk thread keeps its invariant and every frame. -/
+theorem disk_dma_ok {R : Assn} {m : Fp} {st st2 : MState} (hR : Local R)
+    (h : (diskBody ∗ R) m st) (hs : diskDma st = some st2) :
+    (diskBody ∗ R) m st2 := by
+  refine star_frame hR h fun m1 hb => ?_
+  obtain ⟨s, v, ⟨md, mb, hd, rfl, ⟨rfl, hds⟩, ⟨rfl, _⟩⟩, _⟩ := hb
+  simp only [diskDma, hds] at hs
+  split at hs
+  · cases hs
+    refine ⟨⟨⟨false, s.block⟩, s.block,
+      ⟨_, _, hd, rfl, ⟨rfl, ?_⟩, ⟨rfl, ?_⟩⟩, fun _ => rfl⟩, ?_⟩
+    · simp [MState.setDev] <;> rfl
+    · simp [MState.setDev, MState.setMem] <;> rfl
+    · intro c hc
+      cases c with
+      | reg c r => rfl
+      | mem a =>
+        simp [Fp.union, Fp.only] at hc
+        simp [MState.val, MState.setDev, MState.setMem, hc] <;> rfl
+      | dev d =>
+        simp [Fp.union, Fp.only] at hc
+        simp [MState.val, MState.setDev, hc] <;> rfl
+  · cases hs
 
 /-! ## Hart steps -/
 
-/-- The new world after an MMIO store of `b` to the UART. -/
-def World.logUart (w : World) (σ' : MState) (b : Byte) : World :=
-  { w with
-    σ := σ'
-    ghost := fun g => if g = 0 then w.ghost 0 ++ [b] else w.ghost g }
-
-/-- An MMIO store to the UART: open its invariant, let the device model
-take the byte, and extend the console trace (a ghost update). -/
-theorem hart_sb_uart_ok (body : InvName → Assn) (w : World) (i : Nat)
-    (cpu : CPU) (hl : Layout w) (hbody : body (.dev .uart) = uartBody)
-    (hok : WorldOk body w) (hpc : w.holder (.reg cpu .pc) = .thread i)
-    (ha : w.σ.regs cpu .a0 = uartThr) :
-    ∃ σ', hartSb w.σ cpu = some σ' ∧
-      WorldOk body (w.logUart σ' (w.σ.regs cpu .a1)) := by
-  obtain ⟨hd, hg⟩ := hl
-  have hb := hok (.dev .uart)
-  rw [hbody] at hb
-  obtain ⟨s, g, hs, hg0, hsg⟩ := hb
-  rw [view_inv w _ _ hd] at hs
-  rw [view_inv w _ _ hg] at hg0
-  cases hs; cases hg0
-  let s : UartSt := w.σ.devs .uart
-  change s.wire ++ s.tx = w.ghost 0 at hsg
-  let u : UartSt := ⟨s.tx ++ [w.σ.regs cpu .a1], s.wire⟩
-  refine ⟨{ w.σ.setDev .uart u with regs := fun c r =>
-      if c = cpu ∧ r = .pc then w.σ.regs cpu .pc + 4 else w.σ.regs c r },
-    by simp only [hartSb, MState.store, devDecode, ha, ↓reduceIte]; rfl,
-    step_ok body w _ i (.dev .uart) (by rfl) ?_ hok ?_⟩
-  · intro c hc hn
+/-- An MMIO store to the disk's notify register. The hart's proof opens
+the disk invariant, so it owns its registers starred with the device
+and the buffer, and must give the invariant back. -/
+theorem hart_notify_ok {R : Assn} {m : Fp} {st st2 : MState}
+    {cpu : CPU} {p y : Nat} (hR : Local R)
+    (h : ((hartPt cpu p diskNotify y ∗ diskBody) ∗ R) m st)
+    (hs : hartSb st cpu = some st2) :
+    ((hartPt cpu (p + 4) diskNotify y ∗ diskBody) ∗ R) m st2 := by
+  refine star_frame hR h fun m1 hb => ?_
+  obtain ⟨mh, mb, hhb, rfl, hh, hb⟩ := hb
+  obtain ⟨mp, mr, hpr, rfl, ⟨rfl, hpc⟩, ma, my, hay, rfl, ⟨rfl, ha0⟩,
+    ⟨rfl, ha1⟩⟩ := hh
+  obtain ⟨s, v, ⟨md, mv, hdv, rfl, ⟨rfl, hds⟩, ⟨rfl, hdb⟩⟩, _⟩ := hb
+  subst hds
+  simp only [hartSb, MState.store, ha0, ha1, hpc, devDecode, diskNotify,
+    uartThr] at hs
+  cases hs
+  refine ⟨⟨_, _, hhb, rfl,
+    ⟨_, _, hpr, rfl, ⟨rfl, ?_⟩, _, _, hay, rfl, ⟨rfl, ?_⟩, ⟨rfl, ?_⟩⟩,
+    ⟨true, (st.devs .disk : DiskSt).block⟩, v,
+    ⟨_, _, hdv, rfl, ⟨rfl, ?_⟩, ⟨rfl, ?_⟩⟩,
+    fun h => by cases h⟩, ?_⟩
+  · simp [MState.setPc] <;> rfl
+  · simp [MState.setPc, MState.setDev, ha0] <;> rfl
+  · simp [MState.setPc, MState.setDev, ha1] <;> rfl
+  · simp [MState.setPc, MState.setDev] <;> rfl
+  · simp [MState.setPc, MState.setDev, hdb] <;> rfl
+  · intro c hc
     cases c with
     | reg c r =>
-      by_cases e : c = cpu ∧ r = .pc
-      · obtain ⟨rfl, rfl⟩ := e; exact absurd hpc hc
-      · simp only [World.val, World.logUart, e, ↓reduceIte]; rfl
+      have : ¬(c = cpu ∧ r = .pc) := fun ⟨e1, e2⟩ => by
+        subst e1 e2; simp [Fp.union, Fp.only] at hc
+      simp only [MState.val, MState.setPc, MState.setDev, this, ↓reduceIte]
+      rfl
     | mem a => rfl
     | dev d =>
-      cases d with
-      | uart => exact absurd hd hn
-      | _ => rfl
-    | ghost g =>
-      by_cases e : g = 0
-      · subst e; exact absurd hg hn
-      · simp only [World.val, World.logUart, e, ↓reduceIte]; rfl
-  · rw [hbody]
-    refine ⟨_, _, view_inv _ _ _ hd, view_inv _ _ _ hg, ?_⟩
-    simp [World.val, World.logUart, MState.setDev, u, ← hsg]
+      simp [Fp.union, Fp.only] at hc
+      simp [MState.val, MState.setPc, MState.setDev, hc] <;> rfl
 
-/-- A RAM store to a byte the thread holds: no invariant is opened. -/
-theorem hart_sb_ram_ok (body : InvName → Assn) (w : World) (i : Nat)
-    (cpu : CPU) (hok : WorldOk body w)
-    (hpc : w.holder (.reg cpu .pc) = .thread i)
-    (hm : w.holder (.mem (w.σ.regs cpu .a0)) = .thread i)
-    (ha : ramBase ≤ w.σ.regs cpu .a0) (hu : w.σ.regs cpu .a0 ≠ uartThr) :
-    ∃ σ', hartSb w.σ cpu = some σ' ∧
-      WorldOk body { w with σ := σ' } := by
-  refine ⟨_, by simp [hartSb, MState.store, devDecode, hu, ha]; rfl,
-    frame_ok body w _ (by rfl) (fun c n hc => ?_) hok⟩
-  cases c with
-  | reg c r =>
-    by_cases e : c = cpu ∧ r = .pc
-    · obtain ⟨rfl, rfl⟩ := e; rw [hpc] at hc; cases hc
-    · simp [World.val, e]; rfl
-  | mem a =>
-    by_cases e : a = w.σ.regs cpu .a0
-    · subst e; rw [hm] at hc; cases hc
-    · simp [World.val, e]; rfl
-  | _ => rfl
-
-/-! ## The device thread (cf. `Xv6.wpDev_uart_inv`) -/
-
-theorem uart_step_ok (body : InvName → Assn) (w : World) (j : Nat)
-    (hl : Layout w) (hbody : body (.dev .uart) = uartBody)
-    (hok : WorldOk body w) (s' : UartSt)
-    (hs : uartSend (w.σ.devs .uart) = some s') :
-    WorldOk body { w with σ := w.σ.setDev .uart s' } := by
-  obtain ⟨hd, hg⟩ := hl
-  refine step_ok body w _ j (.dev .uart) (by rfl) ?_ hok ?_
-  · intro c _ hn
+/-- A RAM store to a byte the hart owns: no invariant is opened, and the
+frame `R`, which may hold the disk invariant, is untouched. -/
+theorem hart_ram_ok {R : Assn} {m : Fp} {st st2 : MState}
+    {cpu : CPU} {p x y v : Nat} (hR : Local R)
+    (hx : devDecode x = none) (hram : ramBase ≤ x)
+    (h : ((hartPt cpu p x y ∗ memPt x v) ∗ R) m st)
+    (hs : hartSb st cpu = some st2) :
+    ((hartPt cpu (p + 4) x y ∗ memPt x y) ∗ R) m st2 := by
+  refine star_frame hR h fun m1 hb => ?_
+  obtain ⟨mh, mx, hhx, rfl, hh, ⟨rfl, hmx⟩⟩ := hb
+  obtain ⟨mp, mr, hpr, rfl, ⟨rfl, hpc⟩, ma, my, hay, rfl, ⟨rfl, ha0⟩,
+    ⟨rfl, ha1⟩⟩ := hh
+  simp only [hartSb, MState.store, ha0, ha1, hpc, hx, hram, ite_true]
+    at hs
+  cases hs
+  refine ⟨⟨_, _, hhx, rfl,
+    ⟨_, _, hpr, rfl, ⟨rfl, ?_⟩, _, _, hay, rfl, ⟨rfl, ?_⟩, ⟨rfl, ?_⟩⟩,
+    ⟨rfl, ?_⟩⟩, ?_⟩
+  · simp [MState.setPc] <;> rfl
+  · simp [MState.setPc, MState.setMem, ha0] <;> rfl
+  · simp [MState.setPc, MState.setMem, ha1] <;> rfl
+  · simp [MState.setPc, MState.setMem] <;> rfl
+  · intro c hc
     cases c with
-    | dev d =>
-      cases d with
-      | uart => exact absurd hd hn
-      | _ => rfl
-    | _ => rfl
-  · have hb := hok (.dev .uart)
-    rw [hbody] at hb ⊢
-    obtain ⟨s, g, hs0, hg0, hsg⟩ := hb
-    rw [view_inv w _ _ hd] at hs0
-    rw [view_inv w _ _ hg] at hg0
-    cases hs0; cases hg0
-    refine ⟨_, _, view_inv _ _ _ hd, view_inv _ _ _ hg, ?_⟩
-    change (w.σ.devs .uart : UartSt).wire ++ (w.σ.devs .uart : UartSt).tx
-      = w.ghost 0 at hsg
-    simp only [World.val, MState.setDev]
-    revert hs
-    simp only [uartSend]
-    split
-    · next b tx htx =>
-      intro h; cases h
-      show _ ++ [b] ++ tx = _
-      rw [← hsg, htx]; simp
-    · intro h; cases h
+    | reg c r =>
+      have : ¬(c = cpu ∧ r = .pc) := fun ⟨e1, e2⟩ => by
+        subst e1 e2; simp [Fp.union, Fp.only] at hc
+      simp only [MState.val, MState.setPc, MState.setMem, this, ↓reduceIte]
+      rfl
+    | mem a =>
+      simp [Fp.union, Fp.only] at hc
+      simp [MState.val, MState.setPc, MState.setMem, hc] <;> rfl
+    | dev d => rfl
 
 /-! ## "CSL soundness": a fact about the real state -/
 
-/-- The bytes on the UART's wire are a prefix of the console trace. -/
-theorem uart_wire_prefix (body : InvName → Assn) (w : World)
-    (hl : Layout w) (hbody : body (.dev .uart) = uartBody)
-    (hok : WorldOk body w) :
-    ∃ rest, (w.σ.devs .uart : UartSt).wire ++ rest = w.ghost 0 := by
-  have hb := hok (.dev .uart)
-  rw [hbody] at hb
-  obtain ⟨s, g, hs, hg0, hsg⟩ := hb
-  rw [view_inv w _ _ hl.1] at hs
-  rw [view_inv w _ _ hl.2] at hg0
-  cases hs; cases hg0
-  exact ⟨_, hsg⟩
+/-- Whoever holds the disk invariant knows that, once no transfer is due,
+the buffer in RAM holds the disk's block. -/
+theorem disk_buf_holds {R : Assn} {m : Fp} {st : MState}
+    (h : (diskBody ∗ R) m st)
+    (hp : (st.devs .disk : DiskSt).pending = false) :
+    st.mem diskBuf = (st.devs .disk : DiskSt).block := by
+  obtain ⟨_, _, _, _, ⟨s, v, ⟨_, _, _, _, ⟨_, hds⟩, ⟨_, hdb⟩⟩, hpr⟩, _⟩ :=
+    h
+  have e : (st.devs .disk : DiskSt) = s := hds
+  rw [e] at hp ⊢
+  rw [hdb]; exact hpr hp
 
-end ToyRes
+end ToySep
