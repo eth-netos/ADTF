@@ -171,10 +171,16 @@ instance (n : Nat) : Pickable (BitVec n) where
 /-! ## Effects and effect trees -/
 
 /-- The effects of a computation in a system with state `S`. Because `pick`
-holds a type, the effects are in `Type 1`. -/
+holds a type, the effects are in `Type 1`.
+
+Each effect is one atomic step: when computations are interleaved, no other
+step comes between reading and writing the state in `modifyState`, while
+other steps may come between a `getState` and a following `setState`. -/
 inductive Outcome (S : Type) : Type 1 where
   | getState
   | setState (s : S)
+  /-- Replaces the state `s` by `f s`, and answers the old state `s`. -/
+  | modifyState (f : S -> S)
   /-- Picks any value of `T`. Only `eval` uses the instance. -/
   | pick (T : Type) [Pickable T]
   | failedAssert (msg : String)
@@ -186,6 +192,7 @@ answer, so a computation ends with them. -/
 def Outcome.ret {S : Type} : Outcome S -> Type
   | .getState => S
   | .setState _ => Unit
+  | .modifyState _ => S
   | @pick _ T _ => T
   | .failedAssert _ => Empty
   | .failedAssume _ => Empty
@@ -206,6 +213,10 @@ def getState : SpecEffects S S :=
 
 def setState (s : S) : SpecEffects S Unit :=
   .impure (.setState s) .pure
+
+/-- Applies `f` to the state, and returns the old state. -/
+def modifyState (f : S -> S) : SpecEffects S S :=
+  .impure (.modifyState f) .pure
 
 def pick (T : Type) [Pickable T] : SpecEffects S T :=
   .impure (.pick T) .pure
@@ -229,6 +240,7 @@ def wp {A : Type} :
   | .pure a, post, s => post a s
   | .impure .getState k, post, s => wp (k s) post s
   | .impure (.setState s') k, post, _ => wp (k ()) post s'
+  | .impure (.modifyState f) k, post, s => wp (k s) post (f s)
   | .impure (@Outcome.pick _ T _) k, post, s =>
     forall x : T, wp (k x) post s
   | .impure (.failedAssert _) _, _, _ => False
@@ -244,6 +256,7 @@ theorem wp_bind {A B : Type} (m : SpecEffects S A)
     cases call with
     | getState => exact ih s s
     | setState s' => exact ih () s'
+    | modifyState f => exact ih s (f s)
     | pick T => exact forall_congr fun x => ih x s
     | failedAssert => rfl
     | failedAssume => rfl
@@ -256,6 +269,9 @@ theorem wp_bind {A B : Type} (m : SpecEffects S A)
 
 @[simp] theorem wp_setState (s' : S) (post : Unit -> S -> Prop) (s : S) :
     wp (setState s') post s = post () s' := rfl
+
+@[simp] theorem wp_modifyState (f : S -> S) (post : S -> S -> Prop) (s : S) :
+    wp (modifyState f) post s = post s (f s) := rfl
 
 /-- Holds for every `Pickable T`, including ones that are not instances. -/
 @[simp] theorem wp_pick {T : Type} [Pickable T]
@@ -313,6 +329,7 @@ def eval {A : Type} :
   | .pure a, _, _, s => (.success a, s)
   | .impure .getState k, source, i, s => eval (k s) source i s
   | .impure (.setState s') k, source, i, _ => eval (k ()) source i s'
+  | .impure (.modifyState f) k, source, i, s => eval (k s) source i (f s)
   | .impure (@Outcome.pick _ T p) k, source, i, s =>
     match source i T p with
     | .error reason => (.noValueToPick reason, s)
@@ -374,6 +391,29 @@ theorem addSmallOffset_wp (base : Nat) :
   intro h
   simp only [decide_eq_true_eq] at h
   exact ⟨by simp; omega, by simp; omega⟩
+
+/-! ### Atomic read-modify-write -/
+
+/-- Takes the next ticket from a counter in the state: returns the counter
+and increments it, in one atomic step. Written as a `getState` followed by a
+`setState`, two interleaved computations could take the same ticket. -/
+def takeTicket : SpecEffects Nat Nat :=
+  modifyState (· + 1)
+
+def takeTwoTickets : SpecEffects Nat (Nat × Nat) := do
+  let a <- takeTicket
+  let b <- takeTicket
+  return (a, b)
+
+theorem takeTwoTickets_wp (n : Nat) :
+    takeTwoTickets.wp
+      (fun (a, b) s => a = n /\ b = n + 1 /\ s = n + 2) n := by
+  simp only [takeTwoTickets, takeTicket, wp_bind, wp_modifyState, wp_pure,
+    and_self]
+
+/-- info: (SpecEffects.ExecResult.success (5, 6), 7) -/
+#guard_msgs in
+#eval takeTwoTickets.eval (PickSource.random 0) 0 5
 
 /-! ### Use case 2: pseudo-random values, from a seed -/
 
@@ -570,7 +610,7 @@ The proofs use no axioms: they avoid `simp`, which rewrites with `propext`,
 and `funext`, which is proved with `Quot.sound`. So `eval_congr` asks for
 sources that agree on each type and instance, rather than for equal
 functions, and goals are unfolded by `rw` with equation lemmas such as
-`eval.eq_4`, which use no axioms either. -/
+`eval.eq_5`, which use no axioms either. -/
 
 namespace SpecEffects
 
@@ -609,8 +649,9 @@ theorem eval_congr {S A : Type} (m : SpecEffects S A)
     cases call with
     | getState => exact ih s i h s
     | setState s' => exact ih () i h s'
+    | modifyState f => exact ih s i h (f s)
     | @pick T p =>
-      rw [eval.eq_4, eval.eq_4, h i (Nat.le_refl i) T p]
+      rw [eval.eq_5, eval.eq_5, h i (Nat.le_refl i) T p]
       cases source' i T p with
       | error reason => rfl
       | ok x =>
@@ -632,10 +673,11 @@ theorem wp_iff_eval {S A : Type} (m : SpecEffects S A)
     cases call with
     | getState => exact ih s s i
     | setState s' => exact ih () s' i
+    | modifyState f => exact ih s (f s) i
     | @pick T p =>
       constructor
       · intro h source
-        rw [eval.eq_4]
+        rw [eval.eq_5]
         cases source i T p with
         | error reason => trivial
         | ok x => exact (ih x s (i + 1)).mp (h x) source
@@ -651,7 +693,7 @@ theorem wp_iff_eval {S A : Type} (m : SpecEffects S A)
           fun j hj _ _ => ite_eq_right (Nat.ne_of_gt hj)
         have hrun : eval (.impure (.pick T) k) (source.update i (toData x))
             i s = eval (k x) (source.update i (toData x)) (i + 1) s := by
-          rw [eval.eq_4, hpick]
+          rw [eval.eq_5, hpick]
         rw [hrun, eval_congr (k x) _ source (i + 1) hrest] at hx
         exact hx
     | failedAssert msg => exact ⟨False.elim, fun h => h PickSource.empty⟩
