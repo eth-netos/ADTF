@@ -63,7 +63,35 @@ instance [Effect Eff] : Monad (FreeM Eff) where
 `Pickable` is an ordinary type class, so any type can be made pickable by
 writing an instance, without changing anything here (see `Color` below). For
 values of different types to fit in one list, a list stores them as `Data`,
-with the `IsData` that their `Pickable` instances extend. -/
+with the `IsData` that their `Pickable` instances extend.
+
+<human-comment>
+One might think that we could also use a list of elements of sigma type,
+but when the evaluator of .pick gets a value of type ActualType and needs
+to cast it to the ExpectedType given by the .pick in the effect tree,
+it has no way of knowing that ActualType == ExpectedType.
+One trick would be to define a small language of supported types and
+then, the sigma types in the list would be `Σ t : TypeSkeleton, t.interp`
+instead of `Σ T : Type, T`, and then define boolean equality on `TypeSkeleton`
+and turn the boolean equality into Leibniz equality and cast along it.
+But that only works if we fix the language of supported types (`TypeSkeleton`)
+in advance, or pass it as an additional parameter everywhere, both of which
+are undesirable.
+Since Lean does not have open data types that we could use for `TypeSkeleton`,
+we use the `Data`/`IsData` approach instead, ie we encode each value in the
+list source into a generic `Data` using `toData`, and the evaluator decodes
+it back into `T` using `fromData`.
+In the wp/eval consistency proof, in the direction where we are given
+an eval forall nondeterminism sources, and need to construct a wp, we can
+intro the wp's nondeterministic choice (of type `ActualT`) and then need to
+instantiate the eval's nondet source with it.
+But that nondet source needs to return an `Except String ExpectedT` no matter
+what `ExpectedT` it was given, so when constructing the nondet source
+(calling `PickSource.update`), we use `toData`, and its implementation uses
+`fromData` to get the `ExpectedT`, and using `fromData_toData` in the proof,
+we can, overall, cast `ActualT` of the `wp` into `ExpectedT` of the `eval`.
+</human-comment>
+-/
 
 /-- A pseudo-random number determined by `seed` and `i`. -/
 def mixSeed (seed i : Nat) : Nat :=
@@ -560,9 +588,8 @@ def Satisfies {S A : Type} (post : A -> S -> Prop) :
 def PickSource.empty : PickSource := fun _ _ _ => .error "no value"
 
 /-- `source`, except that the `i`-th pick reads back `v`. -/
-def PickSource.update (source : PickSource) (i : Nat) (v : Data) :
-    PickSource :=
-  fun j T p =>
+def PickSource.update (source : PickSource) (i : Nat) (v : Data) : PickSource :=
+  fun (j : Nat) (T : Type) (p : Pickable T) =>
     if j = i then
       match (fromData v : Option T) with
       | some x => .ok x
