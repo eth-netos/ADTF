@@ -733,15 +733,20 @@ structure DmaRegs where
   dst : BitVec 64
   active : Bool
 
-/-- The hardware state that the effects of both components read and write:
-DRAM, indexed by byte address and holding a 64-bit word at each address that
-is used, the two CPU registers, and the configuration registers of the DMA
-engine. `nextReq` counts the memory requests that the CPU has made. -/
-structure Hw where
-  dram : Nat -> BitVec 64
+/-- The state of the CPU core: its two registers, and `nextReq`, which
+counts the memory requests that it has made. -/
+structure CpuState where
   r0 : BitVec 64
   r1 : BitVec 64
   nextReq : Nat
+
+/-- The hardware state that the effects of both components read and write:
+DRAM, indexed by byte address and holding a 64-bit word at each address that
+is used, the state of the CPU core, and the configuration registers of the
+DMA engine. -/
+structure Hw where
+  dram : Nat -> BitVec 64
+  cpu : CpuState
   dma : DmaRegs
 
 /-- The configuration registers `src`, `srcEnd`, `dst` and `active` are at
@@ -779,15 +784,17 @@ inductive MemReq where
 
 def Hw.exec (hw : Hw) : MemReq -> Hw
   | .store addr v => hw.store addr v
-  | .load addr .r0 => { hw with r0 := hw.load addr }
-  | .load addr .r1 => { hw with r1 := hw.load addr }
+  | .load addr .r0 => { hw with cpu := { hw.cpu with r0 := hw.load addr } }
+  | .load addr .r1 => { hw with cpu := { hw.cpu with r1 := hw.load addr } }
 
 /-- A step of the CPU makes the next request of `prog`, in one atomic
 effect. After the last request, a step does nothing. -/
 def cpuStep (prog : List MemReq) : SpecEffects Hw Unit := do
   let _ <- modifyState fun hw =>
-    match prog[hw.nextReq]? with
-    | some req => { hw.exec req with nextReq := hw.nextReq + 1 }
+    match prog[hw.cpu.nextReq]? with
+    | some req =>
+      let hw := hw.exec req
+      { hw with cpu := { hw.cpu with nextReq := hw.cpu.nextReq + 1 } }
     | none => hw
 
 /-- A step of the DMA engine reads its configuration and, if a transfer is
@@ -900,7 +907,7 @@ def program : List MemReq :=
    .load 0x200 .r1]
 
 def initial : Sys where
-  hw := { dram := fun _ => 0, r0 := 0, r1 := 0, nextReq := 0,
+  hw := { dram := fun _ => 0, cpu := { r0 := 0, r1 := 0, nextReq := 0 },
           dma := { src := 0, srcEnd := 0, dst := 0, active := false } }
   cpuRest := cpuStep program
   dmaRest := dmaStep
@@ -911,7 +918,7 @@ def runSchedule (schedule : List Component) :
     Except String (BitVec 64 × BitVec 64) :=
   match Sys.run program (PickSource.ofList (schedule.map toData))
       schedule.length 0 initial with
-  | .ok (sys, _) => .ok (sys.hw.r1, sys.hw.dram 0x200)
+  | .ok (sys, _) => .ok (sys.hw.cpu.r1, sys.hw.dram 0x200)
   | .error _ => .error "stopped"
 
 /-! The lucky schedule: the DMA engine first takes an idle step, then the CPU
