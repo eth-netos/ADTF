@@ -704,3 +704,230 @@ end SpecEffects
 /-- info: 'SpecEffects.wp_iff_eval' does not depend on any axioms -/
 #guard_msgs in
 #print axioms SpecEffects.wp_iff_eval
+
+/-! ## A toy system: interleaving a CPU core and a DMA engine
+
+A CPU core and a DMA engine share DRAM. Each of them repeats a step, written
+as a `SpecEffects Hw Unit`. The system remembers, for each of them, what is
+left of its current step, and a transition of the system picks one of them
+and runs what is left of its step up to and including its next state effect
+(`getState`, `setState` or `modifyState`). When the step is done, the
+component starts a new one. So the steps of the two interleave at their state
+effects, and values that a step has read but not yet written, like the word
+that the DMA engine copies, wait in what is left of the step.
+
+What is left of the steps cannot be part of the state `Hw` that the effects
+read and write: in `Outcome Hw`, `modifyState` takes a function on `Hw`, so
+`Hw` would occur in its own definition to the left of an arrow, which Lean's
+check that inductive types are strictly positive rejects. So it is part of
+`Sys`, which holds `Hw`. -/
+
+namespace ToyDma
+
+/-- The memory-mapped configuration registers of the DMA engine, for one
+ongoing transfer: copy the 64-bit words from `src` up to `srcEnd` to `dst`
+onwards, while `active`. -/
+structure DmaRegs where
+  src : BitVec 64
+  srcEnd : BitVec 64
+  dst : BitVec 64
+  active : Bool
+
+/-- The hardware state that the effects of both components read and write:
+DRAM, indexed by byte address and holding a 64-bit word at each address that
+is used, the two CPU registers, and the configuration registers of the DMA
+engine. `nextReq` counts the memory requests that the CPU has made. -/
+structure Hw where
+  dram : Nat -> BitVec 64
+  r0 : BitVec 64
+  r1 : BitVec 64
+  nextReq : Nat
+  dma : DmaRegs
+
+/-- The configuration registers `src`, `srcEnd`, `dst` and `active` are at
+`dmaBase`, `dmaBase + 8`, `dmaBase + 16` and `dmaBase + 24`. -/
+def dmaBase : Nat := 0x1000
+
+/-- A 64-bit read by the CPU, from DRAM or from a configuration register. -/
+def Hw.load (hw : Hw) (addr : Nat) : BitVec 64 :=
+  if addr = dmaBase then hw.dma.src
+  else if addr = dmaBase + 8 then hw.dma.srcEnd
+  else if addr = dmaBase + 16 then hw.dma.dst
+  else if addr = dmaBase + 24 then (if hw.dma.active then 1 else 0)
+  else hw.dram addr
+
+def Hw.writeDram (hw : Hw) (addr : Nat) (v : BitVec 64) : Hw :=
+  { hw with dram := fun a => if a = addr then v else hw.dram a }
+
+/-- A 64-bit write by the CPU, to DRAM or to a configuration register. -/
+def Hw.store (hw : Hw) (addr : Nat) (v : BitVec 64) : Hw :=
+  if addr = dmaBase then { hw with dma := { hw.dma with src := v } }
+  else if addr = dmaBase + 8 then { hw with dma := { hw.dma with srcEnd := v } }
+  else if addr = dmaBase + 16 then { hw with dma := { hw.dma with dst := v } }
+  else if addr = dmaBase + 24 then
+    { hw with dma := { hw.dma with active := v != 0 } }
+  else hw.writeDram addr v
+
+inductive Reg where
+  | r0
+  | r1
+
+/-- A memory request of the CPU. -/
+inductive MemReq where
+  | store (addr : Nat) (v : BitVec 64)
+  | load (addr : Nat) (reg : Reg)
+
+def Hw.exec (hw : Hw) : MemReq -> Hw
+  | .store addr v => hw.store addr v
+  | .load addr .r0 => { hw with r0 := hw.load addr }
+  | .load addr .r1 => { hw with r1 := hw.load addr }
+
+/-- A step of the CPU makes the next request of `prog`, in one atomic
+effect. After the last request, a step does nothing. -/
+def cpuStep (prog : List MemReq) : SpecEffects Hw Unit := do
+  let _ <- modifyState fun hw =>
+    match prog[hw.nextReq]? with
+    | some req => { hw.exec req with nextReq := hw.nextReq + 1 }
+    | none => hw
+
+/-- A step of the DMA engine reads its configuration and, if a transfer is
+active, the next source word, and then, in a second effect, either writes
+the word and moves on to the next one, or ends the transfer. -/
+def dmaStep : SpecEffects Hw Unit := do
+  let hw <- getState
+  let regs := hw.dma
+  if regs.active then
+    if regs.src.toNat < regs.srcEnd.toNat then
+      let word := hw.dram regs.src.toNat
+      let _ <- modifyState fun hw =>
+        { hw.writeDram regs.dst.toNat word with
+          dma := { regs with src := regs.src + 8, dst := regs.dst + 8 } }
+    else
+      let _ <- modifyState fun hw =>
+        { hw with dma := { hw.dma with active := false } }
+
+inductive Component where
+  | cpu
+  | dma
+  deriving Repr
+
+instance : Pickable Component where
+  toData
+    | .cpu => .leaf 0
+    | .dma => .leaf 1
+  fromData
+    | .leaf 0 => some .cpu
+    | .leaf 1 => some .dma
+    | _ => none
+  fromData_toData c := by cases c <;> rfl
+  random seed := if seed % 2 == 0 then .cpu else .dma
+
+/-- The whole system: the hardware state, and what is left of the current
+step of each component. -/
+structure Sys : Type 1 where
+  hw : Hw
+  cpuRest : SpecEffects Hw Unit
+  dmaRest : SpecEffects Hw Unit
+
+/-- How far `advance` got. -/
+inductive Advanced : Type 1 where
+  /-- One state effect happened, and `rest` is left, with `i` picks made. -/
+  | effect (rest : SpecEffects Hw Unit) (hw : Hw) (i : Nat)
+  /-- The computation ended before any state effect. -/
+  | done (hw : Hw) (i : Nat)
+  | stopped (res : ExecResult Unit)
+
+/-- Runs `m` up to and including its next state effect, taking the picked
+values from `source`, after `i` picks. -/
+def advance : SpecEffects Hw Unit -> PickSource -> Nat -> Hw -> Advanced
+  | .pure _, _, i, hw => .done hw i
+  | .impure .getState k, _, i, hw => .effect (k hw) hw i
+  | .impure (.setState hw') k, _, i, _ => .effect (k ()) hw' i
+  | .impure (.modifyState f) k, _, i, hw => .effect (k hw) (f hw) i
+  | .impure (@Outcome.pick _ T p) k, source, i, hw =>
+    match source i T p with
+    | .error reason => .stopped (.noValueToPick reason)
+    | .ok x => advance (k x) source (i + 1) hw
+  | .impure (.failedAssert msg) _, _, _, _ => .stopped (.assertionFailed msg)
+  | .impure (.failedAssume msg) _, _, _, _ => .stopped (.assumptionFailed msg)
+
+/-- A transition of a component whose steps are `step`, and of whose
+current step `rest` is left: runs `rest` up to its next state effect, or, if
+`rest` has none, a new `step`. Gives what is left afterwards. -/
+def transition (step rest : SpecEffects Hw Unit) (source : PickSource)
+    (i : Nat) (hw : Hw) :
+    Except (ExecResult Unit) (SpecEffects Hw Unit × Hw × Nat) :=
+  match advance rest source i hw with
+  | .effect rest hw i => .ok (rest, hw, i)
+  | .stopped res => .error res
+  | .done hw i =>
+    match advance step source i hw with
+    | .effect rest hw i => .ok (rest, hw, i)
+    | .done hw i => .ok (step, hw, i)
+    | .stopped res => .error res
+
+/-- A transition of the system in which the CPU runs `prog`: picks a
+component and makes a transition of it. -/
+def Sys.step (prog : List MemReq) (source : PickSource) (i : Nat)
+    (sys : Sys) : Except (ExecResult Unit) (Sys × Nat) :=
+  match source i Component inferInstance with
+  | .error reason => .error (.noValueToPick reason)
+  | .ok .cpu => do
+    let (rest, hw, i) <- transition (cpuStep prog) sys.cpuRest source (i + 1)
+      sys.hw
+    return ({ sys with hw, cpuRest := rest }, i)
+  | .ok .dma => do
+    let (rest, hw, i) <- transition dmaStep sys.dmaRest source (i + 1) sys.hw
+    return ({ sys with hw, dmaRest := rest }, i)
+
+/-- `n` transitions of the system. -/
+def Sys.run (prog : List MemReq) (source : PickSource) :
+    Nat -> Nat -> Sys -> Except (ExecResult Unit) (Sys × Nat)
+  | 0, i, sys => .ok (sys, i)
+  | n + 1, i, sys => do
+    let (sys, i) <- sys.step prog source i
+    Sys.run prog source n i sys
+
+/-- Writes 42 to DRAM at `0x100`, configures the DMA engine to copy that
+word to `0x200`, and reads `0x200` back into `r1`, without waiting for the
+DMA engine to finish. -/
+def program : List MemReq :=
+  [.store 0x100 42,
+   .store dmaBase 0x100,
+   .store (dmaBase + 8) 0x108,
+   .store (dmaBase + 16) 0x200,
+   .store (dmaBase + 24) 1,
+   .load 0x200 .r1]
+
+def initial : Sys where
+  hw := { dram := fun _ => 0, r0 := 0, r1 := 0, nextReq := 0,
+          dma := { src := 0, srcEnd := 0, dst := 0, active := false } }
+  cpuRest := cpuStep program
+  dmaRest := dmaStep
+
+/-- Runs the system with the components that `schedule` picks, one for each
+transition, and gives `r1` and the word at `0x200`. -/
+def runSchedule (schedule : List Component) :
+    Except String (BitVec 64 × BitVec 64) :=
+  match Sys.run program (PickSource.ofList (schedule.map toData))
+      schedule.length 0 initial with
+  | .ok (sys, _) => .ok (sys.hw.r1, sys.hw.dram 0x200)
+  | .error _ => .error "stopped"
+
+/-! The lucky schedule: the DMA engine first takes an idle step, then the CPU
+writes the word and configures the DMA engine, which reads and writes the
+word before the CPU reads it back. -/
+
+/-- info: Except.ok (0x000000000000002a#64, 0x000000000000002a#64) -/
+#guard_msgs in
+#eval runSchedule [.dma, .cpu, .cpu, .cpu, .cpu, .cpu, .dma, .dma, .cpu]
+
+/-! The unlucky schedule: the DMA engine reads the word, but the CPU reads
+`0x200` back before the DMA engine writes it, so `r1` is still 0, although
+the word does arrive at `0x200` afterwards. -/
+
+/-- info: Except.ok (0x0000000000000000#64, 0x000000000000002a#64) -/
+#guard_msgs in
+#eval runSchedule [.cpu, .cpu, .cpu, .cpu, .cpu, .dma, .cpu, .dma]
+
+end ToyDma
