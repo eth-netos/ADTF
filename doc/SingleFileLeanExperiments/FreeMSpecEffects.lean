@@ -1,7 +1,3 @@
-import Lean.Data.Json
-
-open Lean (Json ToJson FromJson toJson fromJson?)
-
 /-! # Sketch: `SpecEffects` as a free monad over its effects
 
 This is `sockeye/lean/Scratch/SpecEffects.lean`, restructured around the
@@ -10,17 +6,20 @@ free monad `FreeM` of lean-sail, which xv6iris uses for the Sail model. There,
 failure without a continuation. Here, the failures are effects themselves,
 `Outcome.failedAssert` and `Outcome.failedAssume`, whose answer type is
 `Empty`, so that their continuation can never be called. `SpecEffects S` is
-`FreeM (Outcome S)`, and everything else is as in `SpecEffects.lean`:
+`FreeM (Outcome S)`. Values are turned into a tree of integers, `Data`,
+instead of `Lean.Json`. Everything else is as in `SpecEffects.lean`:
 
 * `SpecEffects.wp`, which quantifies over the values of `T` itself, so that a
   proof can `intro` the value, and never sees the `Pickable` instance,
 * `SpecEffects.eval` with `PickSource.random`, which draws a pseudo-random
   value from a seed through `Pickable.random`,
 * `SpecEffects.eval` with `PickSource.ofList`, which takes the values from a
-  given list of `Json` values, read back with the `FromJson` that the
+  given list of `Data` values, read back with the `IsData` that the
   `Pickable` instance of each picked type extends.
 
-`wp_iff_eval` at the end shows that `wp` and `eval` agree.
+`wp_iff_eval` at the end shows that `wp` and `eval` agree, using no axioms.
+With `Lean.Json`, that is not possible: its type of objects already depends
+on `propext` and `Quot.sound`.
 
 `SpecEffects` knows nothing about predicates on the picked values. To restrict
 a pick, code picks and then assumes, as `natBelow` does: `wp` then gets the
@@ -63,8 +62,8 @@ instance [Effect Eff] : Monad (FreeM Eff) where
 
 `Pickable` is an ordinary type class, so any type can be made pickable by
 writing an instance, without changing anything here (see `Color` below). For
-values of different types to fit in one list, a list stores them as `Json`,
-with the `ToJson` and `FromJson` that their `Pickable` instances extend. -/
+values of different types to fit in one list, a list stores them as `Data`,
+with the `IsData` that their `Pickable` instances extend. -/
 
 /-- A pseudo-random number determined by `seed` and `i`. -/
 def mixSeed (seed i : Nat) : Nat :=
@@ -73,55 +72,73 @@ def mixSeed (seed i : Nat) : Nat :=
   let x := x ^^^ (x >>> 29)
   (x * 0xbf58476d1ce4e5b9 % 2 ^ 64) ^^^ (x >>> 32)
 
+/-- A tree of integers, into which the values of all pickable types are
+turned, so that values of different types fit in one list. -/
+inductive Data where
+  | leaf (_ : Int)
+  | node (_ : List Data)
+
+/-- How values of `T` are turned into `Data` and back. Reading back a value
+from its `Data` gives the value. -/
+class IsData (T : Type) where
+  toData : T -> Data
+  fromData : Data -> Option T
+  fromData_toData : forall x : T, fromData (toData x) = some x
+
 /-- How `SpecEffects.eval` picks values of `T`: `random seed` is a
-pseudo-random value, and values are turned into `Json` and back. Reading back
-a value from its `Json` gives the value, so that `eval` can be given any value
-of `T` as `Json`. An instance can omit the `ToJson` and `FromJson` fields when
-`T` has instances of these classes. -/
-class Pickable (T : Type) extends ToJson T, FromJson T where
+pseudo-random value, and values are turned into `Data` and back, so that
+`eval` can be given any value of `T` as `Data`. -/
+class Pickable (T : Type) extends IsData T where
   random : Nat -> T
-  fromJson_toJson : forall x : T, fromJson? (toJson x) = .ok x
+
+open IsData (toData fromData)
 
 instance : Pickable Unit where
+  toData _ := .node []
+  fromData _ := some ()
+  fromData_toData _ := rfl
   random _ := ()
-  fromJson_toJson _ := rfl
 
 instance : Pickable Bool where
+  toData b := .leaf (if b then 1 else 0)
+  fromData
+    | .leaf 1 => some true
+    | .leaf 0 => some false
+    | _ => none
+  fromData_toData b := by cases b <;> rfl
   random seed := seed % 2 == 0
-  fromJson_toJson b := by cases b <;> rfl
 
 /-- Half of the values are below 16, because small numbers are the most
 interesting ones. -/
 instance : Pickable Nat where
+  toData n := .leaf n
+  fromData
+    | .leaf (.ofNat n) => some n
+    | _ => none
+  fromData_toData _ := rfl
   random seed :=
     if seed % 2 == 0 then seed / 2 % 16 else seed / 2 % 2 ^ 32
-  fromJson_toJson _ := rfl
 
 instance : Pickable Int where
+  toData i := .leaf i
+  fromData
+    | .leaf i => some i
+    | _ => none
+  fromData_toData _ := rfl
   random seed :=
     let magnitude : Int := (Pickable.random (seed / 2) : Nat)
     if seed % 2 == 0 then magnitude else -magnitude
-  fromJson_toJson _ := rfl
 
-/-- Lean has no `Json` instances for `BitVec`, so here is one: the number
-`toNat`. -/
-instance (n : Nat) : ToJson (BitVec n) where
-  toJson b := toJson b.toNat
-
-instance (n : Nat) : FromJson (BitVec n) where
-  fromJson? j := do
-    let m <- (fromJson? j : Except String Nat)
-    if h : m < 2 ^ n then return BitVec.ofFin ⟨m, h⟩
-    else throw s!"{m} does not fit in {n} bits"
-
+/-- A bit vector is its signed value `toInt`. An integer that `toInt` of no
+bit vector of width `n` gives cannot be read back. -/
 instance (n : Nat) : Pickable (BitVec n) where
+  toData b := .leaf b.toInt
+  fromData
+    | .leaf i =>
+      if (BitVec.ofInt n i).toInt = i then some (BitVec.ofInt n i) else none
+    | _ => none
+  fromData_toData b := by simp [BitVec.ofInt_toInt]
   random seed := BitVec.ofNat n seed
-  fromJson_toJson b := by
-    cases b with
-    | ofFin x =>
-      show (if h : x.val < 2 ^ n then _ else _) = _
-      simp only [x.isLt, dite_true]
-      rfl
 
 /-! ## Effects and effect trees -/
 
@@ -252,16 +269,16 @@ def PickSource.random (seed : Nat) : PickSource :=
   fun i _ p => .ok (p.random (mixSeed seed i))
 
 /-- The `i`-th value of `values` for the `i`-th pick. A value that the
-`FromJson` instance of the type to pick cannot read ends the run with
+`IsData` instance of the type to pick cannot read ends the run with
 `noValueToPick`. -/
-def PickSource.ofList (values : List Json) : PickSource :=
+def PickSource.ofList (values : List Data) : PickSource :=
   fun i T _ =>
     match values[i]? with
     | none => .error s!"the list has no value for pick {i}"
     | some v =>
-      match (fromJson? v : Except String T) with
-      | .ok x => .ok x
-      | .error e => .error s!"pick {i}: {e}"
+      match (fromData v : Option T) with
+      | some x => .ok x
+      | none => .error s!"pick {i}: the value is not of the picked type"
 
 def eval {A : Type} :
     SpecEffects S A -> PickSource -> Nat -> S -> ExecResult A × S
@@ -362,12 +379,12 @@ def countSuccesses {A : Type} (m : SpecEffects Unit A) : Nat :=
 
 /-- info: (SpecEffects.ExecResult.success 107, 107) -/
 #guard_msgs in
-#eval addSmallOffset.eval (PickSource.ofList [toJson (7 : Nat)]) 0 100
+#eval addSmallOffset.eval (PickSource.ofList [toData (7 : Nat)]) 0 100
 
 -- A value that violates the assumption makes the run not count.
 /-- info: (SpecEffects.ExecResult.assumptionFailed "x < 10", 100) -/
 #guard_msgs in
-#eval addSmallOffset.eval (PickSource.ofList [toJson (12 : Nat)]) 0 100
+#eval addSmallOffset.eval (PickSource.ofList [toData (12 : Nat)]) 0 100
 
 /-- The first pick of `twoPicks` is a `BitVec 8` and the second a `Bool`. -/
 def twoPicks : SpecEffects Unit (BitVec 8 × Bool) := do
@@ -378,19 +395,27 @@ def twoPicks : SpecEffects Unit (BitVec 8 × Bool) := do
 /-- info: (SpecEffects.ExecResult.success (0x85#8, true), ()) -/
 #guard_msgs in
 #eval twoPicks.eval
-  (PickSource.ofList [toJson (0x85#8 : BitVec 8), toJson true]) 0 ()
+  (PickSource.ofList [toData (0x85#8 : BitVec 8), toData true]) 0 ()
 
 /--
-info: SpecEffects.ExecResult.noValueToPick "pick 0: Natural number expected"
+info: SpecEffects.ExecResult.noValueToPick "the list has no value for pick 1"
 -/
 #guard_msgs in
-#eval (twoPicks.eval (PickSource.ofList [toJson true]) 0 ()).1
+#eval (twoPicks.eval (PickSource.ofList [toData (0x85#8 : BitVec 8)]) 0 ()).1
 
--- Without type tags, a `Json` value is read as whatever type is picked:
--- here `133` is read as a `BitVec 8`.
+-- Without type tags, `Data` is read as whatever type is picked: here the
+-- integer `-123` is read as a `BitVec 8`, and `1` as a `Bool`.
 /-- info: (SpecEffects.ExecResult.success (0x85#8, true), ()) -/
 #guard_msgs in
-#eval twoPicks.eval (PickSource.ofList [toJson (133 : Nat), toJson true]) 0 ()
+#eval twoPicks.eval (PickSource.ofList [.leaf (-123), .leaf 1]) 0 ()
+
+-- `133` is not the `toInt` of any `BitVec 8`.
+/-- info: "pick 0: the value is not of the picked type" -/
+#guard_msgs in
+#eval
+  match (twoPicks.eval (PickSource.ofList [.leaf 133, .leaf 1]) 0 ()).1 with
+  | .noValueToPick msg => msg
+  | _ => "a value for every pick"
 
 /-! ### A type that `SpecEffects` does not know about -/
 
@@ -398,15 +423,24 @@ inductive Color where
   | red
   | green
   | blue
-  deriving Repr, DecidableEq, ToJson, FromJson
+  deriving Repr, DecidableEq
 
 instance : Pickable Color where
+  toData
+    | .red => .leaf 0
+    | .green => .leaf 1
+    | .blue => .leaf 2
+  fromData
+    | .leaf 0 => some .red
+    | .leaf 1 => some .green
+    | .leaf 2 => some .blue
+    | _ => none
+  fromData_toData c := by cases c <;> rfl
   random seed :=
     match seed % 3 with
     | 0 => .red
     | 1 => .green
     | _ => .blue
-  fromJson_toJson c := by cases c <;> rfl
 
 def pickTwoColors : SpecEffects Unit (Color × Color) := do
   let a <- pick Color
@@ -416,7 +450,7 @@ def pickTwoColors : SpecEffects Unit (Color × Color) := do
 /-- info: (SpecEffects.ExecResult.success (Color.blue, Color.red), ()) -/
 #guard_msgs in
 #eval pickTwoColors.eval
-  (PickSource.ofList [toJson Color.blue, toJson Color.red]) 0 ()
+  (PickSource.ofList [toData Color.blue, toData Color.red]) 0 ()
 
 example : pickTwoColors.wp (fun (a, b) _ => a = b -> b = a) () := by
   simp only [pickTwoColors, wp_bind, wp_pick, wp_pure]
@@ -429,12 +463,18 @@ example : pickTwoColors.wp (fun (a, b) _ => a = b -> b = a) () := by
 structure Registers where
   base : Nat
   result : Nat
-  deriving Repr, ToJson, FromJson
+  deriving Repr
 
+/-- A record is the node of its fields. -/
 instance : Pickable Registers where
+  toData regs := .node [toData regs.base, toData regs.result]
+  fromData
+    | .node [base, result] => do
+      return { base := <- fromData base, result := <- fromData result }
+    | _ => none
+  fromData_toData regs := by cases regs; rfl
   random seed :=
     ⟨Pickable.random (mixSeed seed 0), Pickable.random (mixSeed seed 1)⟩
-  fromJson_toJson regs := by cases regs; rfl
 
 /-- Like `addSmallOffset`, but on a record of two registers whose initial
 values are picked: stores the sum of `base` and an offset below 10 in
@@ -464,24 +504,22 @@ info: (SpecEffects.ExecResult.success 107, { base := 100, result := 107 })
 #guard_msgs in
 #eval addSmallOffsetToRegs.eval
   (PickSource.ofList
-    [toJson ({ base := 100, result := 0 } : Registers), toJson (7 : Nat)])
+    [toData ({ base := 100, result := 0 } : Registers), toData (7 : Nat)])
   0 ⟨0, 0⟩
 
--- The record can also be given as `Json` directly.
+-- The record can also be given as `Data` directly.
 /--
 info: (SpecEffects.ExecResult.success 107, { base := 100, result := 107 })
 -/
 #guard_msgs in
 #eval addSmallOffsetToRegs.eval
-  (PickSource.ofList
-    [Json.mkObj [("base", 100), ("result", 0)], (7 : Nat)])
-  0 ⟨0, 0⟩
+  (PickSource.ofList [.node [.leaf 100, .leaf 0], .leaf 7]) 0 ⟨0, 0⟩
 
 -- A missing field means there is no value for the pick.
-/-- info: "pick 0: Registers.result: Natural number expected" -/
+/-- info: "pick 0: the value is not of the picked type" -/
 #guard_msgs in
 #eval
-  let values := [Json.mkObj [("base", 100)], (7 : Nat)]
+  let values := [.node [.leaf 100], .leaf 7]
   match (addSmallOffsetToRegs.eval (PickSource.ofList values) 0 ⟨0, 0⟩).1 with
   | .noValueToPick msg => msg
   | _ => "a value for every pick"
@@ -498,7 +536,13 @@ which plays the demon that picks the values, is to blame, not the program.
 
 In the direction from `eval` to `wp`, the proof picks the source: for the
 value `x : T` over which `wp` quantifies, it uses a source that reads back
-`toJson x`, which is `x` by `Pickable.fromJson_toJson`. -/
+`toData x`, which is `x` by `IsData.fromData_toData`.
+
+The proofs use no axioms: they avoid `simp`, which rewrites with `propext`,
+and `funext`, which is proved with `Quot.sound`. So `eval_congr` asks for
+sources that agree on each type and instance, rather than for equal
+functions, and goals are unfolded by `rw` with equation lemmas such as
+`eval.eq_4`, which use no axioms either. -/
 
 namespace SpecEffects
 
@@ -516,15 +560,21 @@ def Satisfies {S A : Type} (post : A -> S -> Prop) :
 def PickSource.empty : PickSource := fun _ _ _ => .error "no value"
 
 /-- `source`, except that the `i`-th pick reads back `v`. -/
-def PickSource.update (source : PickSource) (i : Nat) (v : Json) :
+def PickSource.update (source : PickSource) (i : Nat) (v : Data) :
     PickSource :=
-  fun j T p => if j = i then fromJson? v else source j T p
+  fun j T p =>
+    if j = i then
+      match (fromData v : Option T) with
+      | some x => .ok x
+      | none => .error "no value"
+    else source j T p
 
 /-- A run that starts after `i` picks only asks the source for the `i`-th and
 later values. -/
 theorem eval_congr {S A : Type} (m : SpecEffects S A)
     (source source' : PickSource) (i : Nat)
-    (h : forall j, i <= j -> source j = source' j) (s : S) :
+    (h : forall j, i <= j -> forall T p, source j T p = source' j T p)
+    (s : S) :
     eval m source i s = eval m source' i s := by
   induction m generalizing i s with
   | pure a => rfl
@@ -532,12 +582,13 @@ theorem eval_congr {S A : Type} (m : SpecEffects S A)
     cases call with
     | getState => exact ih s i h s
     | setState s' => exact ih () i h s'
-    | pick T =>
-      simp only [eval]
-      rw [h i (Nat.le_refl i)]
-      split
-      · rfl
-      · exact ih _ (i + 1) (fun j hj => h j (by omega)) s
+    | @pick T p =>
+      rw [eval.eq_4, eval.eq_4, h i (Nat.le_refl i) T p]
+      cases source' i T p with
+      | error reason => rfl
+      | ok x =>
+        exact ih x (i + 1)
+          (fun j hj => h j (Nat.le_of_succ_le hj)) s
     | failedAssert msg => rfl
     | failedAssume msg => rfl
 
@@ -549,36 +600,38 @@ theorem wp_iff_eval {S A : Type} (m : SpecEffects S A)
     wp m post s <->
       forall source : PickSource, Satisfies post (eval m source i s) := by
   induction m generalizing s i with
-  | pure a =>
-    simp only [wp, eval, Satisfies]
-    exact ⟨fun h _ => h, fun h => h PickSource.empty⟩
+  | pure a => exact ⟨fun h _ => h, fun h => h PickSource.empty⟩
   | impure call k ih =>
     cases call with
     | getState => exact ih s s i
     | setState s' => exact ih () s' i
-    | pick T =>
-      simp only [wp]
+    | @pick T p =>
       constructor
       · intro h source
-        simp only [eval]
-        split
-        · trivial
-        · exact (ih _ s (i + 1)).mp (h _) source
+        rw [eval.eq_4]
+        cases source i T p with
+        | error reason => trivial
+        | ok x => exact (ih x s (i + 1)).mp (h x) source
       · intro h x
         refine (ih x s (i + 1)).mpr (fun source => ?_)
-        have := h (source.update i (toJson x))
-        simp only [eval, PickSource.update, ↓reduceIte,
-          Pickable.fromJson_toJson] at this
-        rwa [eval_congr (k x) _ source (i + 1)
-          (fun j hj => by
-            funext T' p'
-            simp only [PickSource.update, show j ≠ i by omega,
-              ↓reduceIte])] at this
-    | failedAssert msg =>
-      simp only [wp, eval, Satisfies]
-      exact ⟨False.elim, fun h => h PickSource.empty⟩
-    | failedAssume msg =>
-      simp only [wp, eval, Satisfies]
-      exact ⟨fun _ _ => trivial, fun _ => trivial⟩
+        have hx := h (source.update i (toData x))
+        have hpick :
+            source.update i (toData x) i T p = .ok x := by
+          show (if i = i then _ else _) = _
+          rw [ite_eq_left rfl, IsData.fromData_toData]
+        have hrest : forall j, i + 1 <= j -> forall T' p',
+            source.update i (toData x) j T' p' = source j T' p' :=
+          fun j hj _ _ => ite_eq_right (Nat.ne_of_gt hj)
+        have hrun : eval (.impure (.pick T) k) (source.update i (toData x))
+            i s = eval (k x) (source.update i (toData x)) (i + 1) s := by
+          rw [eval.eq_4, hpick]
+        rw [hrun, eval_congr (k x) _ source (i + 1) hrest] at hx
+        exact hx
+    | failedAssert msg => exact ⟨False.elim, fun h => h PickSource.empty⟩
+    | failedAssume msg => exact ⟨fun _ _ => trivial, fun _ => trivial⟩
 
 end SpecEffects
+
+/-- info: 'SpecEffects.wp_iff_eval' does not depend on any axioms -/
+#guard_msgs in
+#print axioms SpecEffects.wp_iff_eval
