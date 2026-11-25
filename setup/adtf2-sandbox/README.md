@@ -25,11 +25,22 @@ Next, we need to create a volume for the container. If we don't create a volume 
 In this example, we create the volume in our home folder:
 
 ```
-mkdir -p ~/docker-volumes/adtf2-volume
+mkdir ~/docker-volumes/
+truncate -s 1T ~/docker-volumes/adtf2-volume.img
+mkfs.ext4 -E root_owner=1000:1000 ~/docker-volumes/adtf2-volume.img
+mkdir -p ~/docker-volumes/adtf2-mnt
+echo "$HOME/docker-volumes/adtf2-volume.img  $HOME/docker-volumes/adtf2-mnt  ext4  loop,nofail  0 0" | sudo tee -a /etc/fstab
+sudo mount $HOME/docker-volumes/adtf2-mnt
+sudo systemctl daemon-reload # as per hint printed by mount
 docker volume create --driver local \
-  --opt type=none --opt o=bind --opt device=~/docker-volumes/adtf2-volume \
+  --opt type=none --opt o=bind --opt device=$HOME/docker-volumes/adtf2-mnt \
   "$(whoami)-adtf2-volume"
 ```
+
+A few hundred gigabytes should probably suffice, but for convenience we just used 1T.
+The `truncate` command generates a sparse file, so it does not consume all the space up-front.
+Note: The `.img` file created by `truncate` has nothing to do with the docker "image", in docker language, that's a *volume*.
+Note also that `ls -lh ~/docker-volumes/adtf2-volume.img` shows the maximum size of the volume, and if you want to get the current actual size, you need to run `du -h ~/docker-volumes/adtf2-volume.img`.
 
 To list your volumes, including the one just created:
 
@@ -76,6 +87,8 @@ The above commands are all one-time setup commands. On the other hand, these are
 * `./serve-web.sh`: Starts a server for a browser-based VS code UI, allowing you to inspect the code the agent is working on
 * `docker stop "$(whoami)-adtf2-sandbox"`: stops the container (needed eg if it ran out of memory), the volume persists
 * `docker start "$(whoami)-adtf2-sandbox"`: restarting the container (needed eg after `stop`, after a docker update that restarted docker, or after a host reboot)
+
+In a new shell in the container (started with `newshell.sh`), you can now also use `df -h ~` to check if the size of the home directory is indeed limited to the size we specified before.
 
 In a new shell inside the container, install Claude (or whatever your favorite LLM agent is):
 
