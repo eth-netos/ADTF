@@ -90,10 +90,37 @@ The above commands are all one-time setup commands. On the other hand, these are
 
 In a new shell in the container (started with `newshell.sh`), you can now also use `df -h ~` to check if the size of the home directory is indeed limited to the size we specified before.
 
+If your host machine performs automatic updates, each update of docker will kill all your docker containers. And if you don't restart docker within 4 hours, all running Claude sessions will get their "environment deleted", so that you can still read the log, but not continue the sessions.
+Therefore, it can make sense to disable automatic updates for docker (but you need to remember to update docker manually!).
+To disable automatic docker updates:
+
+```
+sudo apt-mark hold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+On machines [managed by ETH D-INFK ISG](https://isg.inf.ethz.ch/Main/ServicesDesktopsAndLaptopsLinux), it can also be helpful to run `sudo update-status`, which lists the update policy and status, including packages on hold.
+
+To update docker manually:
+
+```
+sudo apt-mark unhold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo apt update && sudo apt upgrade
+```
+
+and then to put the packages on hold again.
+
 In a new shell inside the container, install Claude (or whatever your favorite LLM agent is):
 
 ```
 curl -fsSLo /tmp/install-claude.sh https://claude.ai/install.sh
 cat /tmp/install-claude.sh
 bash /tmp/install-claude.sh
+```
+
+Run `claude auth login` once and use your browser to get an authentication key and paste it in the terminal. This key is the only secret that needs to be inside the container.
+
+To start a remote-control session that can be opened in the browser as well as on the smartphone app, cd into the directory that this session should work in, and run
+
+```
+claude remote-control --permission-mode auto
 ```
