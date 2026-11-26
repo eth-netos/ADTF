@@ -86,6 +86,44 @@ Notes:
 - Both firmware archives can be downloaded from the NXP mirror
   (HTTP 200 on 2026-11-26).
 
+### Dependencies between the submodules, and references to `meta-imx`
+
+- `imx-atf` refers to neither `meta-freescale`, `imx-manifest` nor
+  `meta-imx`. It is a standalone source tree.
+- `meta-freescale` depends on `imx-atf`: its `imx-atf_2.14.bb` recipe
+  fetches https://github.com/nxp-imx/imx-atf at `af9eb2c17` (the
+  submodule's commit, but fetched separately, not from the submodule). It
+  only refers to `imx-manifest` in comments and in an NXP SCR text file.
+  The only layer it needs is OE-core (`LAYERDEPENDS = "core"`). It does not
+  need `meta-imx`, including for `IMX_DEFAULT_BSP = "nxp"`: `linux-fslc-imx`
+  and `u-boot-imx` are its own recipes.
+- `imx-manifest` depends on `meta-freescale`. Each release manifest pins it
+  (`imx-6.18.37-2.1.0.xml`: branch `wrynose`, `ca31f33c5`). It refers to
+  `imx-atf` only indirectly, through the layers.
+- References to `meta-imx`:
+  - `imx-manifest`: the release manifests list `meta-imx` (and, in the
+    `_orangebox` variants, `meta-imx-orangebox`) as projects to download,
+    and `README.md` mentions it. This is the problematic reference: an
+    unmodified `repo sync` downloads it.
+  - `meta-freescale`, `conf/fragments/bsp/nxp.conf`: an opt-in
+    configuration fragment that says it "Requires a layer providing
+    linux-imx and u-boot-imx (e.g. meta-imx)". It only takes effect if
+    explicitly enabled. We will not enable it.
+  - `meta-freescale`, `recipes-security/optee-imx/*-fslc-imx.inc` (5 files
+    used by the `*.imx` OP-TEE recipes): their headers say they were
+    "Copied from meta-imx/meta-imx-bsp/recipes-security/optee/...". All
+    `meta-imx` release tags checked (`rel_imx_5.4.70_2.3.0` to
+    `rel_imx_6.18.37_2.1.0`) have an NXP license file (`EULA.txt`, later
+    `LICENSE.txt`) at the top level and no separate license for the
+    metadata, so the license of this copied metadata is unclear (see Q12).
+    The NXP
+    BSP for i.MX93 uses these files when `optee` is in `MACHINE_FEATURES`
+    (the default).
+  - `meta-freescale`, comments only (not used by the i.MX93 build): a patch
+    in `recipes-graphics/devil` "Taken from meta-imx", a note on a
+    `imx-seco-libs` patch, a comment in `imx-base.inc`, and the NXP SCR
+    text file `SCR/SCR-6.6.3-1.0.0.txt`.
+
 ### Container and host tools
 
 The container is built from `setup/adtf2-sandbox/docker/Dockerfile`.
@@ -215,7 +253,7 @@ Q5. **NXP BSP or mainline BSP?** Both use `imx-atf` and the same two
     mainline BSP uses upstream-based U-Boot and kernel 7.2 and no
     `imx-mkimage`. Proposal: start with the default NXP BSP. Also: keep
     OP-TEE (BSD-2) or remove `optee` from `MACHINE_FEATURES` for a simpler
-    boot chain?
+    boot chain? (See also Q12.)
 
 Q6. **Does packaging count as modifying the firmware?** `imx-mkimage` (or
     binman) pads and concatenates the DDR firmware files and embeds the
@@ -240,3 +278,13 @@ Q10. **Network isolation:** accept that BitBake tasks are not cut off from
 Q11. **Image contents:** is `core-image-minimal` (BusyBox, serial console
      on `ttyLP0` at 115200) enough as the "simple image", or are packages
      like `openssh` or `dropbear` needed?
+
+Q12. **OP-TEE recipe files copied from `meta-imx`.** Five `.inc` files in
+     `meta-freescale/recipes-security/optee-imx/` say in their headers that
+     they were copied from `meta-imx`, whose releases are distributed under
+     the NXP license. OP-TEE itself is BSD-2-Clause; the question is only
+     about the license of this build metadata. Options: (a) remove `optee`
+     from `MACHINE_FEATURES`, so these files are not used at all;
+     (b) accept them as part of `meta-freescale` (MIT); (c) ask the
+     `meta-freescale` maintainers about their provenance. Proposal: (a) for
+     the first image.
