@@ -32,6 +32,11 @@ mkdir -p ~/docker-volumes/adtf2-mnt
 echo "$HOME/docker-volumes/adtf2-volume.img  $HOME/docker-volumes/adtf2-mnt  ext4  loop,nofail  0 0" | sudo tee -a /etc/fstab
 sudo mount $HOME/docker-volumes/adtf2-mnt
 sudo systemctl daemon-reload # as per hint printed by mount
+cd ~/docker-volumes/adtf2-mnt/
+sudo mkdir home-ubuntu tmp var-tmp
+sudo chown --reference=. home-ubuntu tmp var-tmp
+sudo chmod 1777 tmp var-tmp
+cd ~
 docker volume create --driver local \
   --opt type=none --opt o=bind --opt device=$HOME/docker-volumes/adtf2-mnt \
   "$(whoami)-adtf2-volume"
@@ -56,12 +61,18 @@ Now, let's create and start the container:
 docker run -dit --init --name "$(whoami)-adtf2-sandbox" \
   --cap-drop ALL --security-opt no-new-privileges \
   --pids-limit 4096 --memory 24g \
+  --read-only \
   -p 127.0.0.1::8100 \
-  --mount type=volume,source="$(whoami)-adtf2-volume",target=/home/ubuntu \
+  --mount type=volume,source="$(whoami)-adtf2-volume",target=/home/ubuntu,volume-subpath=home-ubuntu \
+  --mount type=volume,source="$(whoami)-adtf2-volume",target=/tmp,volume-subpath=tmp \
+  --mount type=volume,source="$(whoami)-adtf2-volume",target=/var/tmp,volume-subpath=var-tmp \
   "$(whoami)-adtf2-image"
 ```
 
 Make sure you set the memory limit well below the available RAM on your host machine. If you ask an agent to write Lean proofs about assembly code, it is likely to call `simp` on expressions that unfold to such huge terms that Lean consumes seemingly unbounded amounts of RAM, which can lock up your container, and if the memory limit of the container is too big, it can also lock up your host so that you cannot even ssh into it anymore.
+
+The `--read-only` flag enforces that this container can only write to locations given as mounted volumes, instead of everywhere under `/` (even though not being root already limits writes to most locations under `/`). Without this flag, writes would go into an additional writable image layer somewhere in docker's images folder, which might fill up the system partition faster than you like.
+And the three `--mount` options make sure `/tmp`, `/var/tmp`, and `/home/ubuntu` all write to the `.img`-file-backed volume we created above.
 
 Claude's explanation of what each option does:
 
@@ -108,6 +119,13 @@ sudo apt update && sudo apt upgrade
 ```
 
 and then to put the packages on hold again.
+
+Note that in this project, the main author and committer of each commit must be a human. It is ok to instruct an AI bot to write the commit, but it needs a `Co-Authored-By:` commit message trailer to indicate the bot name and model, and the main committer and author must be the human who prompted the bot, so it is recommended to run these commands in the container, replacing the placeholders:
+
+```
+git config --global user.name  "Your Name"
+git config --global user.email you@example.org
+```
 
 In a new shell inside the container, install Claude (or whatever your favorite LLM agent is):
 
