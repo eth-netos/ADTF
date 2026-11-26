@@ -5,6 +5,10 @@ procedure, and open questions. Nothing has been built yet.
 
 Status as of 2026-11-26: planning, no build started.
 
+Decisions (D…) and open questions (Q…) keep their numbers. A resolved
+question is removed from "Open questions" and becomes a decision that names
+it, so gaps in the question numbering are expected.
+
 ## Decisions
 
 D1. **The NXP firmware binaries are never modified.** The boot firmware
@@ -29,13 +33,21 @@ D4. **Submodules in this repo** (added by the human project owner):
 - `imx-atf`: https://github.com/nxp-imx/imx-atf, branch `lf_v2.14`,
   commit `af9eb2c17` (BSD-3-Clause).
 - `meta-freescale`: https://github.com/Freescale/meta-freescale,
-  currently at `master` `fe15edb0a` (MIT metadata).
+  branch `wrynose`, commit `89e6e24b5` (MIT metadata). See D5.
 - `imx-manifest`: https://github.com/nxp-imx/imx-manifest, branch
   `imx-linux-wrynose`, commit `66a5b81` (MIT).
 
+D5. **`meta-freescale` follows its `wrynose` branch** (resolves Q2),
+    matching `openembedded-core` wrynose (Yocto 6.0). Switched on
+    2026-11-26 from `master` `fe15edb0a` to `wrynose` `89e6e24b5`, and
+    recorded as `branch = wrynose` in `.gitmodules`. `89e6e24b5`
+    contains the commit `ca31f33c5` that `imx-6.18.37-2.1.0.xml` pins, plus
+    596 later backport commits.
+
 ## Verified facts
 
-Checked by an agent on 2026-11-26.
+Checked by an agent on 2026-11-26. Facts about `meta-freescale` refer to
+`wrynose` `89e6e24b5` unless stated otherwise.
 
 ### Licenses
 
@@ -52,7 +64,7 @@ Checked by an agent on 2026-11-26.
   `meta-imx`, `meta-nxp-connectivity` and `meta-nxp-demo-experience`, so
   `repo sync` with an unmodified manifest would download NXP-EULA layers.
   The manifest is therefore used only as a reference for which revisions of
-  the other layers work together (see Q2).
+  the other layers work together.
 - Not everything under https://github.com/nxp-imx is under the NXP license.
   `linux-imx` (GPL-2.0), `uboot-imx` (GPL-2.0), `imx-mkimage` (GPL-2.0-only)
   and `imx-atf` (BSD-3-Clause) are open source. The NXP license covers
@@ -61,19 +73,25 @@ Checked by an agent on 2026-11-26.
 ### What the build pulls in for `imx93-11x11-lpddr4x-frdm`
 
 `meta-freescale` has the machine
-`conf/machine/imx93-11x11-lpddr4x-frdm.conf`. By default it uses the NXP BSP
-(`IMX_DEFAULT_BSP = "nxp"` in `imx93-evk.inc`). A mainline BSP is also
-supported.
+`conf/machine/imx93-11x11-lpddr4x-frdm.conf`. On `wrynose`, all i.MX93
+machines use the NXP BSP: `imx93-evk.inc` sets `IMX_DEFAULT_BSP = "nxp"`
+with a hard assignment, and the FRDM machine has no mainline U-Boot
+settings. (On `master`, `fe15edb0a`, the same file uses `?=`, and the FRDM
+machine also supports a mainline BSP with `u-boot-fslc` 2026.10, U-Boot
+binman instead of `imx-mkimage`, and `linux-fslc` 7.2.)
 
-| Component | NXP BSP (default)              | Mainline BSP     | License  |
-|-----------|--------------------------------|------------------|----------|
-| TF-A      | `imx-atf` 2.14 `af9eb2c17`     | same             | BSD-3    |
-| U-Boot    | `u-boot-imx` 2026.04           | `u-boot-fslc`    | GPL-2.0+ |
-| Container | `imx-boot` (`imx-mkimage`)     | U-Boot binman    | GPL-2.0  |
-| Kernel    | `linux-fslc-imx` 6.18          | `linux-fslc` 7.2 | GPL-2.0  |
-| ELE fw    | `firmware-ele-imx` 2.0.7       | same             | NXP EULA |
-| DDR fw    | `imx-boot-firmware-files` 8.33 | same             | NXP EULA |
-| OP-TEE    | `optee-os` (machine feature)   | not by default   | BSD-2    |
+| Part      | Recipe                         | Source               | License  |
+|-----------|--------------------------------|----------------------|----------|
+| TF-A      | `imx-atf` 2.14 `af9eb2c17`     | nxp-imx/imx-atf      | BSD-3    |
+| U-Boot    | `u-boot-imx` 2026.04           | nxp-imx/uboot-imx    | GPL-2.0+ |
+| Container | `imx-boot` (`imx-mkimage`)     | nxp-imx/imx-mkimage  | GPL-2.0  |
+| Kernel    | `linux-fslc-imx` 6.18          | Freescale/linux-fslc | GPL-2.0  |
+| ELE fw    | `firmware-ele-imx` 2.0.7       | NXP mirror           | NXP EULA |
+| DDR fw    | `imx-boot-firmware-files` 8.33 | NXP mirror           | NXP EULA |
+| OP-TEE    | `optee-os` 4.10.0.imx          | nxp-imx/imx-optee-os | BSD-2    |
+
+Source repos are on GitHub. OP-TEE is included because `optee` is in the
+NXP BSP's `MACHINE_FEATURES`.
 
 Notes:
 - The `imx-atf` recipe in `meta-freescale` pins **exactly the commit our
@@ -82,7 +100,7 @@ Notes:
 - With the NXP BSP, `MACHINE_FEATURES` also includes `nxpiw612-sdio` and
   `nxpwifi-all-sdio`, which bring in `firmware-nxp-wifi`
   (`LicenseRef-Proprietary`). This is not covered by D1 and must be kept
-  out (see "License enforcement" below).
+  out (see step 4 of the build procedure).
 - Both firmware archives can be downloaded from the NXP mirror
   (HTTP 200 on 2026-11-26).
 
@@ -116,9 +134,8 @@ Notes:
     `rel_imx_6.18.37_2.1.0`) have an NXP license file (`EULA.txt`, later
     `LICENSE.txt`) at the top level and no separate license for the
     metadata, so the license of this copied metadata is unclear (see Q12).
-    The NXP
-    BSP for i.MX93 uses these files when `optee` is in `MACHINE_FEATURES`
-    (the default).
+    The NXP BSP for i.MX93 uses these files when `optee` is in
+    `MACHINE_FEATURES` (the default).
   - `meta-freescale`, comments only (not used by the i.MX93 build): a patch
     in `recipes-graphics/devil` "Taken from meta-imx", a note on a
     `imx-seco-libs` patch, a comment in `imx-base.inc`, and the NXP SCR
@@ -176,7 +193,7 @@ Not yet executed. Pending answers to the open questions.
      `imx-manifest/imx-6.18.37-2.1.0.xml` (tag `yocto-6.0.2`, "wrynose").
    - `meta-yocto`, at tag `yocto-6.0.2`, for the `poky` distro (MIT).
      Optional (see Q4).
-   - `meta-freescale`, at a revision compatible with wrynose (see Q2).
+   - `meta-freescale`, branch `wrynose` (D5).
 
    No `meta-imx`, `meta-nxp-*`, `meta-qt6`, `meta-browser` and so on.
    `meta-openembedded` and `meta-arm` are not needed for a minimal image.
@@ -233,13 +250,6 @@ Q1. **EULA acceptance.** Building `firmware-ele-imx` and
     and unpacked under the same EULA, even though only the DDR files are
     installed.
 
-Q2. **Which `meta-freescale` revision?** The submodule is on `master`
-    (`fe15edb0a`, which declares compatibility with `whinlatter wrynose
-    blacksail`). `imx-manifest` pins `meta-freescale` branch `wrynose` at
-    `ca31f33c5`, and the `wrynose` branch head is `89e6e24b5`. Proposal:
-    switch the submodule to the `wrynose` branch to match `openembedded-core`
-    wrynose, unless there is a reason to track master.
-
 Q3. **How to fetch the other layers:** git submodules (consistent with the
     rest of this repo, recorded in git history) or `repo` with our own
     trimmed manifest? Proposal: submodules.
@@ -247,13 +257,13 @@ Q3. **How to fetch the other layers:** git submodules (consistent with the
 Q4. **Distro:** `poky` (needs `meta-yocto`, well tested) or `nodistro`
     (OE-core only, fewer layers)? Proposal: `poky`.
 
-Q5. **NXP BSP or mainline BSP?** Both use `imx-atf` and the same two
-    firmware packages, and both are GPL for U-Boot and the kernel. The NXP
-    BSP (the default) is the configuration NXP tests for this board. The
-    mainline BSP uses upstream-based U-Boot and kernel 7.2 and no
-    `imx-mkimage`. Proposal: start with the default NXP BSP. Also: keep
-    OP-TEE (BSD-2) or remove `optee` from `MACHINE_FEATURES` for a simpler
-    boot chain? (See also Q12.)
+Q5. **NXP BSP or mainline BSP?** Since D5, the NXP BSP is the only one
+    `meta-freescale` sets up for this board, so using the mainline BSP
+    would mean either our own machine configuration or going back to
+    `master`. Both BSPs use `imx-atf` and the same two firmware packages,
+    and both are GPL for U-Boot and the kernel. Proposal: use the NXP BSP.
+    Also: keep OP-TEE (BSD-2) or remove `optee` from `MACHINE_FEATURES` for
+    a simpler boot chain? (See also Q12.)
 
 Q6. **Does packaging count as modifying the firmware?** `imx-mkimage` (or
     binman) pads and concatenates the DDR firmware files and embeds the

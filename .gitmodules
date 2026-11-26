@@ -11,6 +11,7 @@
 [submodule "meta-freescale"]
 	path = meta-freescale
 	url = https://github.com/Freescale/meta-freescale
+	branch = wrynose
 [submodule "imx-manifest"]
 	path = imx-manifest
 	url = https://github.com/nxp-imx/imx-manifest
