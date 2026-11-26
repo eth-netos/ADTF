@@ -3,7 +3,7 @@
 	url = https://gitlab.inf.ethz.ch/project-opensockeye/sockeye.git
 [submodule "kraken"]
 	path = kraken
-	url = git@github.com:samuelgruetter/kraken.git
+	url = https://github.com/samuelgruetter/kraken.git
 [submodule "imx-atf"]
 	path = imx-atf
 	url = https://github.com/nxp-imx/imx-atf.git
