@@ -25,12 +25,13 @@ D3. **`meta-imx` is not used.** Its release is distributed under the NXP
     `meta-freescale` (MIT metadata) is used instead.
 
 D4. **Submodules in this repo** (added by the human project owner):
-    - `imx-atf`: https://github.com/nxp-imx/imx-atf, branch `lf_v2.14`,
-      commit `af9eb2c17` (BSD-3-Clause).
-    - `meta-freescale`: https://github.com/Freescale/meta-freescale,
-      currently at `master` `fe15edb0a` (MIT metadata).
-    - `imx-manifest`: https://github.com/nxp-imx/imx-manifest, branch
-      `imx-linux-wrynose`, commit `66a5b81` (MIT).
+
+- `imx-atf`: https://github.com/nxp-imx/imx-atf, branch `lf_v2.14`,
+  commit `af9eb2c17` (BSD-3-Clause).
+- `meta-freescale`: https://github.com/Freescale/meta-freescale,
+  currently at `master` `fe15edb0a` (MIT metadata).
+- `imx-manifest`: https://github.com/nxp-imx/imx-manifest, branch
+  `imx-linux-wrynose`, commit `66a5b81` (MIT).
 
 ## Verified facts
 
