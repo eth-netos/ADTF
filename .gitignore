@@ -1,3 +1,7 @@
 .lake
 *~
 __pycache__/
+# Parser table cache that BitBake writes into the current directory whenever
+# it cannot write to its own install location (e.g. the read-only
+# /opt/bitbake in the sandbox container).
+pyshtables.py
