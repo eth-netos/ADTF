@@ -5,3 +5,7 @@ __pycache__/
 # it cannot write to its own install location (e.g. the read-only
 # /opt/bitbake in the sandbox container).
 pyshtables.py
+# Yocto build directories (see doc/building/building_imx93_images.md). They
+# hold per-user settings such as conf/toolcfg.conf, which records the
+# person's own acceptance of the NXP EULA, and must never be committed.
+/yocto-build/

@@ -44,6 +44,25 @@ D5. **`meta-freescale` follows its `wrynose` branch** (resolves Q2),
     contains the commit `ca31f33c5` that `imx-6.18.37-2.1.0.xml` pins, plus
     596 later backport commits.
 
+D6. **The NXP EULA is never accepted in this repository** (resolves Q1).
+    Each person who builds reads `meta-freescale/EULA` and decides for
+    themselves. If they accept, they enable the `meta-freescale` fragment
+    `freescale-layer/eula/accept-fsl-eula` in their own build directory
+    (step 1 of "Build instructions"). Nothing committed to this
+    repo may set `ACCEPT_FSL_EULA`, enable that fragment, or record anyone's
+    acceptance. Agents never enable the fragment.
+    `bitbake-config-build enable-fragment` writes only
+    `<build-dir>/conf/toolcfg.conf` (its default `--confpath`, which
+    `openembedded-core/meta/conf/bitbake.conf` includes). The build
+    directory is `yocto-build/` in this repo, which `.gitignore` excludes,
+    so the acceptance cannot be committed by accident.
+    Two consequences of how `meta-freescale/classes/fsl-eula-unpack.bbclass`
+    checks `ACCEPT_FSL_EULA`: the check is in `do_unpack`, so the NXP
+    archives are already *downloaded* (`do_fetch`) before acceptance is
+    checked. And the `firmware-imx` archive holds many other blobs (VPU,
+    SDMA, HDMI, EPDC, …) that get unpacked under the same EULA, even though
+    only the DDR files are installed.
+
 ## Verified facts
 
 Checked by an agent on 2026-11-26. Facts about `meta-freescale` refer to
@@ -201,20 +220,21 @@ Not yet executed. Pending answers to the open questions.
 2. **Fetching layers.** Either as further git submodules of this repo, or
    with `repo` and our own MIT manifest derived from `imx-manifest` that
    lists only the layers above (see Q3).
-3. **Directory layout** (outside the git tree, under `/home/ubuntu`):
-   `~/yocto/downloads` (`DL_DIR`), `~/yocto/sstate-cache` (`SSTATE_DIR`),
-   and `~/yocto/build-imx93-frdm` (build dir with `conf/` and `tmp/`).
+3. **Directory layout:** the build directory (with `conf/` and `tmp/`) is
+   `yocto-build/imx93-frdm` in this repo, ignored by `.gitignore` (D6).
+   Downloads and sstate are shared between build directories and kept
+   outside the repo: `~/yocto-cache/downloads` (`DL_DIR`) and
+   `~/yocto-cache/sstate-cache` (`SSTATE_DIR`).
 4. **`local.conf`** (sketch):
 
    ```
    MACHINE = "imx93-11x11-lpddr4x-frdm"
    DISTRO = "poky"
-   DL_DIR = "/home/ubuntu/yocto/downloads"
-   SSTATE_DIR = "/home/ubuntu/yocto/sstate-cache"
+   DL_DIR = "/home/ubuntu/yocto-cache/downloads"
+   SSTATE_DIR = "/home/ubuntu/yocto-cache/sstate-cache"
    BB_NUMBER_THREADS = "12"
    PARALLEL_MAKE = "-j 12"
    INHERIT += "rm_work"
-   ACCEPT_FSL_EULA = "1"          # only after the human accepts it (Q1)
    MACHINE_FEATURES:remove = "nxpiw612-sdio nxpwifi-all-sdio"
    INCOMPATIBLE_LICENSE = "LicenseRef-Proprietary"
    # plus exceptions for exactly the two firmware recipes from D1
@@ -240,15 +260,50 @@ of the identical commit. Once we change TF-A, we point the recipe at the
 submodule (e.g. with `externalsrc` or a `.bbappend` that sets
 `SRC_URI`/`SRCREV`).
 
-## Open questions
+## Build instructions
 
-Q1. **EULA acceptance.** Building `firmware-ele-imx` and
-    `imx-boot-firmware-files` requires `ACCEPT_FSL_EULA = "1"`. Only the
-    human owner can accept the NXP license; an agent must not set this
-    without explicit confirmation. Note that the `firmware-imx` archive
-    holds many other blobs (VPU, SDMA, HDMI, EPDC, …). They get downloaded
-    and unpacked under the same EULA, even though only the DDR files are
-    installed.
+Incomplete: the layer checkout depends on Q3 and the distro on Q4, and
+none of this has been run yet. Below, `$LAYERS` is the directory that holds
+the checkouts of `bitbake`, `openembedded-core` and `meta-yocto` (not yet
+decided, see Q3). All commands run from the root of this repo.
+
+Set up the build directory (once). Because `/opt/bitbake` is on `PATH` and
+is the wrong BitBake version, `oe-init-build-env` must be used, which puts
+`$LAYERS/bitbake/bin` first:
+
+```
+source $LAYERS/openembedded-core/oe-init-build-env yocto-build/imx93-frdm
+bitbake-layers add-layer ../../meta-freescale
+bitbake-layers add-layer $LAYERS/meta-yocto/meta-poky   # only for poky, Q4
+```
+
+`oe-init-build-env` changes into the build directory. In a new shell, run
+the `source` line again to get back into it. Then edit `conf/local.conf` as
+in step 4 of the proposed build procedure.
+
+1. Accept the NXP EULA for this build directory, only if you have read
+   `meta-freescale/EULA` and accept it yourself (D6):
+
+   ```
+   bitbake-config-build enable-fragment freescale-layer/eula/accept-fsl-eula
+   ```
+
+2. Check, before the long build (step 5 of the proposed procedure):
+
+   ```
+   bitbake -p
+   bitbake -g core-image-minimal
+   ```
+
+3. Build, in `tmux` or with `nohup`, because it takes hours:
+
+   ```
+   bitbake core-image-minimal 2>&1 | tee build-core-image-minimal.log
+   ```
+
+The images end up in `tmp/deploy/images/imx93-11x11-lpddr4x-frdm/`.
+
+## Open questions
 
 Q3. **How to fetch the other layers:** git submodules (consistent with the
     rest of this repo, recorded in git history) or `repo` with our own
