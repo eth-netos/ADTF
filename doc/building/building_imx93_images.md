@@ -1,9 +1,10 @@
 # Building Linux images for the FRDM i.MX93 board
 
-Living planning document: decisions, verified facts, the proposed build
-procedure, and open questions. Nothing has been built yet.
+Living planning document: decisions, verified facts, the build procedure,
+and open questions. Nothing has been built yet.
 
-Status as of 2026-11-26: planning, no build started.
+Status as of 2026-11-27: planning; BitBake is downloaded to
+`~/tools/bitbake` (D16); `meta-adtf` does not exist yet; no build started.
 
 Decisions (D…) and open questions (Q…) keep their numbers. A resolved
 question is removed from "Open questions" and becomes a decision that names
@@ -17,7 +18,7 @@ D1. **The NXP firmware binaries are never modified.** The boot firmware
     (`lpddr4_{i,d}mem_{1,2}d_v202201.bin`, from `firmware-imx`) are only
     available under the NXP Software License Agreement (LA_OPT_NXP v64.2).
     The human project owner accepts using them unmodified. Neither the human
-    nor any agent may modify these files. (See also Q6 about packaging.)
+    nor any agent may modify these files. (See also D11 about packaging.)
 
 D2. **No other software under the NXP Software License Agreement** (or any
     other proprietary license) goes into the image or the build, apart from
@@ -36,7 +37,7 @@ D6. **The NXP EULA is never accepted in this repository** (resolves Q1).
     Each person who builds reads `meta-freescale/EULA` and decides for
     themselves. If they accept, they enable the `meta-freescale` fragment
     `freescale-layer/eula/accept-fsl-eula` in their own build directory
-    (step 1 of "Build instructions"). Nothing committed to this
+    (step 5 of the build procedure). Nothing committed to this
     repo may set `ACCEPT_FSL_EULA`, enable that fragment, or record anyone's
     acceptance. Agents never enable the fragment.
     `bitbake-config-build enable-fragment` writes only
@@ -64,21 +65,21 @@ Addition of git submodules can be done by the agent if the human project
 owner asks for it explicitly.
 
 - **Source code we modify:** submodule, built through an override in
-  `meta-adtf` (D8): `imx-atf`, `linux`.
+  `meta-adtf` (D8): `imx-atf`, and later `linux` (not added yet).
 - **Our own layer:** committed directly in this repo: `meta-adtf` (D8).
 - **Layers and BitBake, unmodified:** not submodules. A layer setup tool
   puts them on disk at pinned versions (`bitbake-setup`, D10):
   `bitbake`, `openembedded-core`, `meta-yocto` (if poky, Q4),
   `meta-freescale`.
 - **Recipe sources we don't modify:** downloaded by BitBake: U-Boot,
-  `imx-mkimage`, OP-TEE, the firmware, GCC, BusyBox and so on.
+  `imx-mkimage`, the firmware, GCC, BusyBox and so on.
 
 Layers have to be on disk because BitBake reads them from local
 directories and never downloads them. `imx-manifest` is not read by BitBake
 at all; we only use it as a reference for which versions go together,
 which is recorded in this document (`imx-6.18.37-2.1.0.xml`, commit
-`66a5b81`). The `linux` submodule is marked `shallow = true` and
-`update = none` in `.gitmodules` (see "Shallow submodules" for why).
+`66a5b81`). The `linux` submodule, once added, is marked `shallow = true`
+and `update = none` in `.gitmodules` (see "Shallow submodules" for why).
 
 D8. **Our own layer `meta-adtf/`** at the repo root holds everything we
 change about the build, so that `meta-freescale` and the other layers
@@ -88,6 +89,7 @@ stay unmodified:
 meta-adtf/
   conf/layer.conf                        # declares the layer
   conf/fragments/board/imx93-frdm.conf   # committed build config
+  bitbake-setup/imx93-frdm.conf.json     # layer setup (D10)
   recipes-bsp/imx-atf/imx-atf_%.bbappend
   recipes-kernel/linux/linux-fslc-imx_%.bbappend
 ```
@@ -96,10 +98,11 @@ meta-adtf/
 - The fragment `adtf/board/imx93-frdm` holds the build configuration
   that everyone shares: `MACHINE`, `DISTRO`, the license policy
   (`INCOMPATIBLE_LICENSE` and its two exceptions from D1), and removing
-  the Wi-Fi machine features (and `optee`, if Q12 goes that way).
-- Only per-person settings live in the ignored build directory:
-  thread counts and cache paths in `conf/local.conf`, and the person's
-  own EULA acceptance in `conf/toolcfg.conf` (D6).
+  the Wi-Fi machine features and `optee` (D15). See step 4 of the build
+  procedure.
+- Only per-person settings live outside the repo: thread counts in
+  `~/yocto-builds/site.conf` (D10), and the person's own EULA acceptance
+  in the build directory's `conf/toolcfg.conf` (D6).
 - Fragments are parsed after `local.conf` (`bitbake.conf` line 822 vs.
   817), so plain `=` assignments in the fragment win over `local.conf`.
   Settings people may want to tune use `?=` in the fragment.
@@ -148,6 +151,9 @@ we use `bitbake-setup` instead to download the right repos.
 - Per-person settings that should survive `bitbake-setup update` go into
   `~/yocto-builds/site.conf` (created once, never overwritten) rather
   than the build directory's `conf/local.conf`.
+- `bitbake-setup` itself runs from `~/tools/bitbake` (D16). The build then
+  uses the copy that `bitbake-setup` clones into
+  `~/yocto-builds/imx93-frdm/layers/bitbake`, at the same commit.
 - Sketch of the configuration (not yet written or tested):
 
 ```
@@ -184,6 +190,44 @@ we use `bitbake-setup` instead to download the right repos.
   }]}
 }
 ```
+
+D11. **Packaging the firmware into the boot image is not modification**
+(resolves Q6). `imx-mkimage` pads and concatenates the DDR firmware files
+and embeds the ELE container into `flash.bin`; the files' contents stay
+unchanged, so this is allowed under D1.
+
+D12. **Board setup** (resolves Q7): we assume `meta-freescale`'s default
+silicon revision (`IMX_SOC_REV = "A1"`, so `mx93a1-ahab-container.img`).
+The human project owner sets the DIP switch SW1 (`BOOT_MODE`) to `0001`:
+the boot core is the Cortex-A core (not the Cortex-M), and the boot device
+is the serial downloader (USB). How images get onto the board is out of
+scope for now.
+
+D13. **BitBake tasks are not cut off from the network** (resolves Q10).
+Unprivileged user namespaces do not work in the container (`unshare -Urn`
+returns EPERM, because of `--cap-drop ALL`, Docker's seccomp profile, and
+the host's `apparmor_restrict_unprivileged_userns=1`). OE's `check_userns`
+sanity check still passes, because `unshare` fails cleanly. The effect is
+that tasks other than `do_fetch` can reach the network. We accept this
+reproducibility risk and do not change the container setup for it.
+
+D14. **The image is `core-image-minimal`** (resolves Q11): BusyBox, serial
+console on `ttyLP0` at 115200, no SSH server.
+
+D15. **No OP-TEE** (resolves Q12, option a): the `optee` machine feature is
+removed in the `meta-adtf` fragment, so the five OP-TEE `.inc` files that
+`meta-freescale` copied from `meta-imx` are not used, and the boot chain is
+simpler.
+
+D16. **BitBake tools come from `~/tools/bitbake`, never from
+`/opt/bitbake`.** `~/tools/bitbake` is a full clone of
+https://github.com/openembedded/bitbake, checked out at `yocto-6.0.2`
+(`acfe02fa3`, BitBake 2.18.0), and goes first on `PATH` (step 1 of the
+build procedure). This works the same in a future container without
+`/opt/bitbake`, lets BitBake write `pyshtables.py` into its own
+installation directory (checked: `lib/bb/pysh/pyshtables.py`, ignored by
+BitBake's git, nothing written to the current directory), and allows
+switching versions with `git checkout` without a new container.
 
 ## Verified facts
 
@@ -231,8 +275,8 @@ binman instead of `imx-mkimage`, and `linux-fslc` 7.2.)
 | DDR fw    | `imx-boot-firmware-files` 8.33 | NXP mirror           | NXP EULA |
 | OP-TEE    | `optee-os` 4.10.0.imx          | nxp-imx/imx-optee-os | BSD-2    |
 
-Source repos are on GitHub. OP-TEE is included because `optee` is in the
-NXP BSP's `MACHINE_FEATURES`.
+Source repos are on GitHub. OP-TEE is included by default because `optee`
+is in the NXP BSP's `MACHINE_FEATURES`; we remove it (D15).
 
 Notes:
 - The `imx-atf` recipe in `meta-freescale` fetches the same commit as our
@@ -251,7 +295,7 @@ Notes:
 - Both firmware archives can be downloaded from the NXP mirror
   (HTTP 200 on 2026-11-26).
 
-### Dependencies between the submodules, and references to `meta-imx`
+### Dependencies, and references to `meta-imx`
 
 - `imx-atf` refers to neither `meta-freescale`, `imx-manifest` nor
   `meta-imx`. It is a standalone source tree.
@@ -280,9 +324,9 @@ Notes:
     `meta-imx` release tags checked (`rel_imx_5.4.70_2.3.0` to
     `rel_imx_6.18.37_2.1.0`) have an NXP license file (`EULA.txt`, later
     `LICENSE.txt`) at the top level and no separate license for the
-    metadata, so the license of this copied metadata is unclear (see Q12).
-    The NXP BSP for i.MX93 uses these files when `optee` is in
-    `MACHINE_FEATURES` (the default).
+    metadata, so the license of this copied metadata is unclear. The NXP
+    BSP for i.MX93 uses these files when `optee` is in `MACHINE_FEATURES`
+    (the default), which is why we remove it (D15).
   - `meta-freescale`, comments only (not used by the i.MX93 build): a patch
     in `recipes-graphics/devil` "Taken from meta-imx", a note on a
     `imx-seco-libs` patch, a comment in `imx-base.inc`, and the NXP SCR
@@ -316,34 +360,77 @@ This matters for `linux`: the default branch of `Freescale/linux-fslc` is
 full history of `6.18-2.1.x-imx` (several GB). Hence `update = none` for
 `linux` (D7).
 
-## Proposed build procedure
+## Build procedure
 
-Not yet executed. Pending answers to the open questions.
+Incomplete: the distro depends on Q4, `meta-adtf` (with its fragment and
+`bitbake-setup` configuration) does not exist yet, and only step 1 has
+been run. Commands run from the root of this repo unless stated otherwise.
 
-1. **Layer set.** Use only:
-   - `bitbake` and `openembedded-core`, at the revisions from
-     `imx-manifest/imx-6.18.37-2.1.0.xml` (tag `yocto-6.0.2`, "wrynose").
-   - `meta-yocto`, at tag `yocto-6.0.2`, for the `poky` distro (MIT).
-     Optional (see Q4).
-   - `meta-freescale`, branch `wrynose` (D5).
-   - `meta-adtf`, our own layer (D8).
+**Layer set:** `bitbake` and `openembedded-core` at tag `yocto-6.0.2`
+("wrynose", the revisions `imx-6.18.37-2.1.0.xml` pins), `meta-yocto` at
+`yocto-6.0.2` for the `poky` distro (MIT, only if Q4 = poky),
+`meta-freescale` on `wrynose` (D5), and `meta-adtf` (D8). No `meta-imx`,
+`meta-nxp-*`, `meta-qt6`, `meta-browser` and so on. `meta-openembedded`
+and `meta-arm` are not needed for a minimal image; they are only added if
+parsing shows they are required.
 
-   No `meta-imx`, `meta-nxp-*`, `meta-qt6`, `meta-browser` and so on.
-   `meta-openembedded` and `meta-arm` are not needed for a minimal image.
-   They are only added if parsing shows they are required.
-2. **Fetching layers:** with `bitbake-setup` (D7, D10). Only `imx-atf` and
-   `linux` are submodules ("Submodule commands").
-3. **Directory layout** (D10): top directory `~/yocto-builds`, setup
-   directory `~/yocto-builds/imx93-frdm` with `layers/`, `build/` and
-   `config/`; downloads in `~/yocto-builds/.bitbake-setup-downloads` and
-   sstate in `~/yocto-builds/.sstate-cache`, shared by all setups.
+**Directory layout** (D10): top directory `~/yocto-builds`, setup
+directory `~/yocto-builds/imx93-frdm` with `layers/`, `build/` and
+`config/`; downloads in `~/yocto-builds/.bitbake-setup-downloads` and
+sstate in `~/yocto-builds/.sstate-cache`, shared by all setups.
+
+1. **Get BitBake** (once per home directory, D16; done on 2026-11-27):
+
+   ```
+   mkdir -p ~/tools
+   git clone https://github.com/openembedded/bitbake.git ~/tools/bitbake
+   git -C ~/tools/bitbake checkout yocto-6.0.2
+   ```
+
+   In every new shell (or in `~/.bashrc`), put it first on `PATH`, then
+   check that it is the one found and that it has the right version:
+
+   ```
+   export PATH="$HOME/tools/bitbake/bin:$PATH"
+   which bitbake bitbake-setup  # expect ~/tools/bitbake/bin/... for both
+   bitbake --version            # expect: BitBake Build Tool Core version 2.18.0
+   git -C ~/tools/bitbake describe --tags   # expect: yocto-6.0.2
+   ```
+
+2. **Tell `bitbake-setup` where the top directory is** (once per person,
+   stored in `~/.config/bitbake-setup/settings.conf`):
+
+   ```
+   bitbake-setup settings set --global default top-dir-prefix "$HOME"
+   bitbake-setup settings set --global default top-dir-name yocto-builds
+   ```
+
+3. **Set up the layers and the build directory** (once; not yet tested):
+
+   ```
+   bitbake-setup init --non-interactive \
+       meta-adtf/bitbake-setup/imx93-frdm.conf.json
+   ```
+
+   This clones the layers into `~/yocto-builds/imx93-frdm/layers`, writes
+   `bblayers.conf`, and enables the fragment `adtf/board/imx93-frdm`.
+   Then, in every new shell:
+
+   ```
+   source ~/yocto-builds/imx93-frdm/build/init-build-env
+   which bitbake  # expect ~/yocto-builds/imx93-frdm/layers/bitbake/bin/bitbake
+   ```
+
+   This puts the setup's own BitBake copy (same commit as
+   `~/tools/bitbake`) first on `PATH` and changes into the build directory.
+
 4. **Configuration** (sketch). Committed, in the fragment
    `meta-adtf/conf/fragments/board/imx93-frdm.conf` (D8):
 
    ```
    MACHINE = "imx93-11x11-lpddr4x-frdm"
    DISTRO = "poky"
-   MACHINE_FEATURES:remove = "nxpiw612-sdio nxpwifi-all-sdio"
+   MACHINE_FEATURES:remove = "nxpiw612-sdio nxpwifi-all-sdio optee"
    INCOMPATIBLE_LICENSE = "LicenseRef-Proprietary"
    # plus exceptions for exactly the two firmware recipes from D1
    INHERIT += "rm_work"
@@ -356,64 +443,8 @@ Not yet executed. Pending answers to the open questions.
    BB_NUMBER_THREADS = "12"
    PARALLEL_MAKE = "-j 12"
    ```
-5. **Check before the long build.** Run a parse and dependency-graph pass
-   (`bitbake -p`, `bitbake -g core-image-minimal`), and from it list every
-   recipe in the build together with its `LICENSE`. Confirm that the only
-   `LicenseRef-Proprietary` recipes are `firmware-ele-imx` and
-   `imx-boot-firmware-files`, and that the `INCOMPATIBLE_LICENSE`
-   exception syntax works for them.
-6. **Build** `core-image-minimal`. Do it in `tmux`/`nohup` with a log,
-   because it takes hours.
-7. **Review licenses after the build:**
-   `tmp/deploy/licenses/<image>/license.manifest` for the rootfs, and the
-   recipes that went into `imx-boot`/`flash.bin`.
-8. **Output:** `tmp/deploy/images/imx93-11x11-lpddr4x-frdm/`, containing
-   `core-image-minimal-*.wic.zst` (+ `.bmap`) and the boot image
-   `imx-boot` / `flash.bin`. Flash to microSD with `bmaptool`, or to eMMC
-   with `uuu`, from outside the container (Q8).
 
-Using the `imx-atf` submodule: until we change TF-A, the build can use the
-recipe's own fetch of the same commit (plus its patch). Once we change
-TF-A, `meta-adtf` points the recipe at the submodule (Q13).
-
-
-## Build instructions
-
-Incomplete: the distro depends on Q4, `meta-adtf` (with its
-`bitbake-setup` configuration) does not exist yet, and none of this has
-been run yet.
-
-Once per person, tell `bitbake-setup` where the top directory is (stored
-in `~/.config/bitbake-setup/settings.conf`):
-
-```
-bitbake-setup settings set --global default top-dir-prefix "$HOME"
-bitbake-setup settings set --global default top-dir-name yocto-builds
-```
-
-Set up the layers and the build directory (once), from the root of this
-repo. `/opt/bitbake/bin/bitbake-setup` (BitBake master, on `PATH`) is used
-to run this; the setup itself uses the BitBake revision from the
-configuration (not yet tested):
-
-```
-bitbake-setup init --non-interactive \
-    meta-adtf/bitbake-setup/imx93-frdm.conf.json
-```
-
-This clones the layers into `~/yocto-builds/imx93-frdm/layers`, writes
-`bblayers.conf`, and enables the fragment `adtf/board/imx93-frdm`. Then,
-in every new shell:
-
-```
-source ~/yocto-builds/imx93-frdm/build/init-build-env
-```
-
-It puts the right BitBake first on `PATH` (ahead of `/opt/bitbake`) and
-changes into the build directory. Put the per-person settings from step 4
-of the proposed build procedure into `~/yocto-builds/site.conf`.
-
-1. Accept the NXP EULA for this build directory, only if you have read
+5. **Accept the NXP EULA** for this build directory, only if you have read
    `~/yocto-builds/imx93-frdm/layers/meta-freescale/EULA` and accept it
    yourself (D6):
 
@@ -421,20 +452,37 @@ of the proposed build procedure into `~/yocto-builds/site.conf`.
    bitbake-config-build enable-fragment freescale-layer/eula/accept-fsl-eula
    ```
 
-2. Check, before the long build (step 5 of the proposed procedure):
+6. **Check before the long build**: parse, and compute the dependency
+   graph:
 
    ```
    bitbake -p
    bitbake -g core-image-minimal
    ```
 
-3. Build, in `tmux` or with `nohup`, because it takes hours:
+   From the result, list every recipe in the build together with its
+   `LICENSE`. Confirm that the only `LicenseRef-Proprietary` recipes are
+   `firmware-ele-imx` and `imx-boot-firmware-files`, and that the
+   `INCOMPATIBLE_LICENSE` exception syntax works for them.
+
+7. **Build** (D14), in `tmux` or with `nohup`, because it takes hours:
 
    ```
    bitbake core-image-minimal 2>&1 | tee build-core-image-minimal.log
    ```
 
-The images end up in `tmp/deploy/images/imx93-11x11-lpddr4x-frdm/`.
+8. **Review licenses after the build**:
+   `tmp/deploy/licenses/<image>/license.manifest` for the rootfs, and the
+   recipes that went into `imx-boot`/`flash.bin`.
+
+**Output:** `tmp/deploy/images/imx93-11x11-lpddr4x-frdm/`, containing
+`core-image-minimal-*.wic.zst` (+ `.bmap`) and the boot image
+`imx-boot` / `flash.bin`. Getting them onto the board is out of scope for
+now (D12).
+
+**Using the `imx-atf` submodule:** until we change TF-A, the build can use
+the recipe's own fetch of the same commit (plus its patch). Once we change
+TF-A, `meta-adtf` points the recipe at the submodule (Q13).
 
 ## Open questions
 
@@ -446,42 +494,6 @@ Q5. **NXP BSP or mainline BSP?** Since D5, the NXP BSP is the only one
     would mean either our own machine configuration or going back to
     `master`. Both BSPs use `imx-atf` and the same two firmware packages,
     and both are GPL for U-Boot and the kernel. Proposal: use the NXP BSP.
-    Also: keep OP-TEE (BSD-2) or remove `optee` from `MACHINE_FEATURES` for
-    a simpler boot chain? (See also Q12.)
-
-Q6. **Does packaging count as modifying the firmware?** `imx-mkimage` (or
-    binman) pads and concatenates the DDR firmware files and embeds the
-    ELE container into `flash.bin`. The files' contents stay unchanged.
-    Proposal: treat this as packaging, not modification, under D1.
-
-Q7. **Board details:** which FRDM-IMX93 revision and silicon revision?
-    `meta-freescale` assumes `IMX_SOC_REV = "A1"`
-    (`mx93a1-ahab-container.img`). Boot from microSD or eMMC?
-
-Q8. **Flashing:** the container has no USB/serial access to the board.
-    Copy the images to the laptop or host and flash there (`bmaptool` or
-    `uuu`)?
-
-Q9. **Host disk space:** is there at least about 150 GB of real free space
-    on the host disk behind `~/docker-volumes/adtf2-volume.img`?
-
-Q10. **Network isolation:** accept that BitBake tasks are not cut off from
-     the network (because user namespaces are unavailable), or change the
-     container setup?
-
-Q11. **Image contents:** is `core-image-minimal` (BusyBox, serial console
-     on `ttyLP0` at 115200) enough as the "simple image", or are packages
-     like `openssh` or `dropbear` needed?
-
-Q12. **OP-TEE recipe files copied from `meta-imx`.** Five `.inc` files in
-     `meta-freescale/recipes-security/optee-imx/` say in their headers that
-     they were copied from `meta-imx`, whose releases are distributed under
-     the NXP license. OP-TEE itself is BSD-2-Clause; the question is only
-     about the license of this build metadata. Options: (a) remove `optee`
-     from `MACHINE_FEATURES`, so these files are not used at all;
-     (b) accept them as part of `meta-freescale` (MIT); (c) ask the
-     `meta-freescale` maintainers about their provenance. Proposal: (a) for
-     the first image.
 
 Q13. **How to build TF-A from the `imx-atf` submodule:** `externalsrc` (as
      for Linux, D9; builds uncommitted changes; skips the recipe's patch)
