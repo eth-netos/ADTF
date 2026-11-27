@@ -4,7 +4,8 @@ Living planning document: decisions, verified facts, the build procedure,
 and open questions. Nothing has been built yet.
 
 Status as of 2026-11-27: planning; BitBake is downloaded to
-`~/tools/bitbake` (D16); `meta-adtf` does not exist yet; no build started.
+`~/tools/bitbake` (D16); of `meta-adtf`, only the fragment exists; no
+build started.
 
 Decisions (D…) and open questions (Q…) keep their numbers. A resolved
 question is removed from "Open questions" and becomes a decision that names
@@ -40,9 +41,8 @@ D6. **The NXP EULA is never accepted in this repository** (resolves Q1).
     (step 5 of the build procedure). Nothing committed to this
     repo may set `ACCEPT_FSL_EULA`, enable that fragment, or record anyone's
     acceptance. Agents never enable the fragment.
-    `bitbake-config-build enable-fragment` writes only
-    `<build-dir>/conf/toolcfg.conf` (its default `--confpath`, which
-    `openembedded-core/meta/conf/bitbake.conf` includes). The build
+    Enabling the fragment only changes the build directory's
+    `conf/toolcfg.conf` (step 5 of the build procedure). The build
     directory is outside this repo (`~/yocto-builds/imx93-frdm/build`,
     D10), and `.gitignore` excludes `bitbake-builds/`, where
     `bitbake-setup` would put it if run from the repo root without the
@@ -386,9 +386,10 @@ full history of `6.18-2.1.x-imx` (several GB). Hence `update = none` for
 
 ## Build procedure
 
-Incomplete: the distro depends on Q4, `meta-adtf` (with its fragment and
-`bitbake-setup` configuration) does not exist yet, and only step 1 has
-been run. Commands run from the root of this repo unless stated otherwise.
+Incomplete: the distro depends on Q4, `meta-adtf` has only its fragment
+so far (no `layer.conf` or `bitbake-setup` configuration yet), and only
+step 1 has been run. Commands run from the root of this repo unless
+stated otherwise.
 
 **Layer set:** `bitbake` and `openembedded-core` at tag `yocto-6.0.2`
 ("wrynose", the revisions `imx-6.18.37-2.1.0.xml` pins), `meta-yocto` at
@@ -462,17 +463,9 @@ sstate in `~/yocto-builds/.sstate-cache`, shared by all setups.
    This puts the setup's own BitBake copy (same commit as
    `~/tools/bitbake`) first on `PATH` and changes into the build directory.
 
-4. **Configuration** (sketch). Committed, in the fragment
-   `meta-adtf/conf/fragments/board/imx93-frdm.conf` (D8):
-
-   ```
-   MACHINE = "imx93-11x11-lpddr4x-frdm"
-   DISTRO = "poky"
-   MACHINE_FEATURES:remove = "nxpiw612-sdio nxpwifi-all-sdio optee"
-   INCOMPATIBLE_LICENSE = "LicenseRef-Proprietary"
-   # plus exceptions for exactly the two firmware recipes from D1
-   INHERIT += "rm_work"
-   ```
+4. **Configuration.** The shared configuration is committed in the
+   fragment `meta-adtf/conf/fragments/board/imx93-frdm.conf` (D8), which
+   step 3 enables.
 
    `rm_work` (`openembedded-core/meta/classes/rm_work.bbclass`) deletes
    each recipe's work directory (unpacked sources and build objects, but
@@ -494,6 +487,21 @@ sstate in `~/yocto-builds/.sstate-cache`, shared by all setups.
 
    ```
    bitbake-config-build enable-fragment freescale-layer/eula/accept-fsl-eula
+   ```
+
+   This changes only one file, the build directory's `conf/toolcfg.conf`
+   (the default `--confpath` of `bitbake-config-build`): it adds the
+   fragment's name to the `OE_FRAGMENTS += "…"` line, next to
+   `adtf/board/imx93-frdm` from step 3. Nothing is downloaded or built.
+   From then on, every BitBake run in this build directory parses
+   `meta-freescale/conf/fragments/eula/accept-fsl-eula.conf`, which sets
+   `ACCEPT_FSL_EULA = "1"` (`openembedded-core/meta/conf/bitbake.conf`
+   includes `conf/toolcfg.conf` and then applies `addfragments`). To check
+   and to undo:
+
+   ```
+   bitbake-getvar ACCEPT_FSL_EULA
+   bitbake-config-build disable-fragment freescale-layer/eula/accept-fsl-eula
    ```
 
 6. **Check before the long build**: parse, and compute the dependency
