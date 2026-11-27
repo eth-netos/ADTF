@@ -28,21 +28,9 @@ D3. **`meta-imx` is not used.** Its release is distributed under the NXP
     `SCR-6.18.37-2.1.0.txt` in `meta-imx` tag `rel_imx_6.18.37_2.1.0`).
     `meta-freescale` (MIT metadata) is used instead.
 
-D4. **Submodules in this repo** (added by the human project owner):
+D4. **Submodules**: See D7.
 
-- `imx-atf`: https://github.com/nxp-imx/imx-atf, branch `lf_v2.14`,
-  commit `af9eb2c17` (BSD-3-Clause).
-- `meta-freescale`: https://github.com/Freescale/meta-freescale,
-  branch `wrynose`, commit `89e6e24b5` (MIT metadata). See D5.
-- `imx-manifest`: https://github.com/nxp-imx/imx-manifest, branch
-  `imx-linux-wrynose`, commit `66a5b81` (MIT).
-
-D5. **`meta-freescale` follows its `wrynose` branch** (resolves Q2),
-    matching `openembedded-core` wrynose (Yocto 6.0). Switched on
-    2026-11-26 from `master` `fe15edb0a` to `wrynose` `89e6e24b5`, and
-    recorded as `branch = wrynose` in `.gitmodules`. `89e6e24b5`
-    contains the commit `ca31f33c5` that `imx-6.18.37-2.1.0.xml` pins, plus
-    596 later backport commits.
+D5. **We use `meta-freescale`'s `wrynose` branch**
 
 D6. **The NXP EULA is never accepted in this repository** (resolves Q1).
     Each person who builds reads `meta-freescale/EULA` and decides for
@@ -70,8 +58,10 @@ D6. **The NXP EULA is never accepted in this repository** (resolves Q1).
 
 D7. **Only code we modify becomes a submodule** (resolves Q3; revised on
 2026-11-27, when the human project owner decided against submodules for
-unmodified code). The human project owner adds and removes submodules;
-agents only propose the commands. All paths are relative to the repo root.
+unmodified code).
+Removal of unused git submodules is only done by the human project owner.
+Addition of git submodules can be done by the agent if the human project
+owner asks for it explicitly.
 
 - **Source code we modify:** submodule, built through an override in
   `meta-adtf` (D8): `imx-atf`, `linux`.
@@ -79,11 +69,9 @@ agents only propose the commands. All paths are relative to the repo root.
 - **Layers and BitBake, unmodified:** not submodules. A layer setup tool
   puts them on disk at pinned versions (`bitbake-setup`, D10):
   `bitbake`, `openembedded-core`, `meta-yocto` (if poky, Q4),
-  `meta-freescale`. The existing `meta-freescale` submodule is removed;
-  its branch choice (D5) moves into the `bitbake-setup` configuration.
+  `meta-freescale`.
 - **Recipe sources we don't modify:** downloaded by BitBake: U-Boot,
   `imx-mkimage`, OP-TEE, the firmware, GCC, BusyBox and so on.
-- **Reference only:** not a submodule: `imx-manifest`.
 
 Layers have to be on disk because BitBake reads them from local
 directories and never downloads them. `imx-manifest` is not read by BitBake
@@ -142,6 +130,8 @@ D10. **Layers are set up with `bitbake-setup`** (resolves Q14), from our
 own configuration file committed at
 `meta-adtf/bitbake-setup/imx93-frdm.conf.json`, with the top directory
 `~/yocto-builds` outside this repo.
+We do not use Google's `repo` tool, even though some NXP setups do that,
+we use `bitbake-setup` instead to download the right repos.
 
 - The configuration pins every source to an exact commit (the
   `yocto-6.0.2` commits for `bitbake`, `openembedded-core` and
@@ -298,78 +288,6 @@ Notes:
     `imx-seco-libs` patch, a comment in `imx-base.inc`, and the NXP SCR
     text file `SCR/SCR-6.6.3-1.0.0.txt`.
 
-### How the tools fit together
-
-- **BitBake** is the build engine: it parses configuration and recipes
-  from the layers listed in `conf/bblayers.conf` (local directories),
-  builds a task graph, runs the tasks in parallel and reuses earlier
-  results from the sstate cache. Recipe tasks (`do_fetch`) download source
-  code; layers themselves are never downloaded by BitBake.
-- **`repo`** (Google's multi-repository tool) only checks out git
-  repositories listed in a manifest XML such as `imx-manifest`'s. It knows
-  nothing about BitBake, and BitBake does not know about it. NXP uses it to
-  put the right layer versions on disk. **`bitbake-setup`** (in
-  `bitbake/bin` at `yocto-6.0.2`) does the same from a JSON configuration,
-  and also creates the build directory (D10).
-- `oe-init-build-env` finds BitBake at `openembedded-core/bitbake` or, if
-  that does not exist, `openembedded-core/../bitbake`
-  (`scripts/oe-buildenv-internal`).
-
-### Layer setup tools: `repo` and `bitbake-setup`
-
-Read from the sources by an agent on 2026-11-27 (`bitbake-setup` at
-BitBake `yocto-6.0.2`, `repo` launcher 2.36 in the container). Neither has
-been run here yet.
-
-**`repo`** (Google's tool, used by NXP and Android):
-- Input: a manifest XML listing git repos, remotes, paths and revisions.
-  It can come from a git repo (`repo init -u <url> -m <file>`) or, with
-  `repo init --standalone-manifest -u <url or path to .xml>`, from a single
-  file. We would write our own manifest, modelled on `imx-manifest` but
-  without `meta-imx` and the other NXP layers.
-- Location: the directory where `repo init` is run (the "client"). It
-  keeps manifests and git data in `.repo/` and checks out each project at
-  its manifest `path` (NXP uses `sources/<layer>`).
-- Caching: none between clients by default; each client has its own
-  `.repo/projects`. Sharing needs `repo init --reference <mirror>` or a
-  mirror made with `repo init --mirror`. `clone-depth` per project, or
-  `repo init --depth`, makes shallow clones.
-- It knows nothing about BitBake: the build directory and `bblayers.conf`
-  are set up separately (as NXP does with its `imx-setup-release.sh`).
-- The installed `/usr/bin/repo` is only a launcher. On first use it
-  downloads the actual tool from `gerrit.googlesource.com/git-repo`
-  (reachable, HTTP 200 on 2026-11-27).
-
-**`bitbake-setup`** (part of BitBake, `bitbake/bin/bitbake-setup`):
-- Input: a JSON configuration listing the sources (git remote, branch,
-  revision, path), which layers go into `bblayers.conf`, and which
-  configuration fragments to enable, with choices such as machine and
-  distro. Configurations come from a registry (BitBake ships
-  `default-registry/configurations/`, e.g. `poky-wrynose.conf.json`), a
-  local file (`bitbake-setup init <file.json> …`) or a URL.
-  `meta-freescale` ships one too:
-  `default-registry/configurations/fsl-community-bsp-wrynose.conf.json`.
-- Location: a "top directory", by default `$PWD/bitbake-builds`
-  (settings `top-dir-prefix` and `top-dir-name`, stored in
-  `~/.config/bitbake-setup/settings.conf` or `<top>/settings.conf`). Each
-  setup is a subdirectory `<top>/<setup-name>/` with `layers/` (the
-  checkouts), `build/` (the BitBake build directory, with
-  `init-build-env`) and `config/` (a git repo in which it commits the
-  configuration and the exact revisions it checked out, as
-  `sources-fixed-revisions.json`, on each `init` and `update`).
-- Caching: it fetches layer repos with BitBake's own git fetcher into a
-  shared download directory, `<top>/.bitbake-setup-downloads`, and
-  writes a `<top>/site.conf` that points every build's `DL_DIR` there and,
-  by default (`common-sstate`), `SSTATE_DIR` to `<top>/.sstate-cache`. So
-  all setups under one top directory share layer clones, recipe
-  downloads and sstate.
-- `bitbake-setup init -L <source> <path>` symlinks a local checkout in
-  place of a source, for development. `bitbake-setup status` and
-  `update` check for and apply upstream changes.
-- It needs a BitBake checkout to run from. `/opt/bitbake` (master,
-  BitBake 2.20) is on `PATH` and should be able to set up a wrynose
-  configuration, since its registry includes `poky-wrynose`.
-
 ### Shallow submodules
 
 Tested by an agent on 2026-11-27 with a throwaway parent repo and the
@@ -397,49 +315,6 @@ This matters for `linux`: the default branch of `Freescale/linux-fslc` is
 `7.2.x+fslc`, so a plain `git submodule update --init` would download the
 full history of `6.18-2.1.x-imx` (several GB). Hence `update = none` for
 `linux` (D7).
-
-### Container and host tools
-
-The container is built from `setup/adtf2-sandbox/docker/Dockerfile`.
-
-- All Yocto host packages are present: gcc 13.3, make 4.3, git 2.43,
-  tar 1.35, Python 3.12, chrpath, cpio, diffstat, gawk, socat, texinfo,
-  wget, xz, zstd, lz4, GitPython, jinja2, pexpect, subunit. The locale
-  `en_US.UTF-8` is set. The `repo` launcher 2.36 is installed.
-  `bmap-tools` and `uuu` are installed for flashing.
-- **Unprivileged user namespaces do not work** (`unshare -Urn` returns
-  EPERM, because of `--cap-drop ALL`, Docker's seccomp profile, and the
-  host's `apparmor_restrict_unprivileged_userns=1`). OE's `check_userns`
-  sanity check still passes, because `unshare` fails cleanly. The only
-  effect is that BitBake cannot cut tasks other than `do_fetch` off from
-  the network. That's a reproducibility risk, not a blocker.
-- `/opt/bitbake` (BitBake 2.20, upstream master) is too new for Yocto 6.0
-  "wrynose". The build uses the BitBake revision that matches
-  `openembedded-core`. `oe-init-build-env` puts it first on `PATH`.
-- Read-only root filesystem: only `/home/ubuntu`, `/tmp` and `/var/tmp` are
-  writable. All build directories must be under `/home/ubuntu`.
-- No direct access to the board from inside the container (no USB or
-  serial devices). Flashing happens outside the container (see Q8).
-
-### Resources
-
-- CPU: 16 cores. RAM: 24 GiB (cgroup limit; `free` shows the host's
-  31 GiB). No swap. PID limit: 4096.
-- Disk: `/home/ubuntu` is a 1 TB sparse ext4 image with about 956 GB free
-  inside. How much space the host disk really has left is not visible from
-  inside the container (see Q9).
-
-Estimate for `core-image-minimal` from scratch:
-- Disk: about 50 to 80 GB without `rm_work` (about 20 to 30 GB with
-  `INHERIT += "rm_work"`), plus about 10 GB downloads and about 10 GB
-  sstate cache.
-- Time: about 1 to 2.5 hours on 16 cores, depending on network and disk
-  speed. Rebuilds from sstate take minutes.
-- RAM: 24 GiB is enough for 16 parallel tasks for this image, but not with
-  much to spare if large Lean jobs run at the same time. The plan caps
-  parallelism (see "Build procedure").
-
-Conclusion: the resources should be enough.
 
 ## Proposed build procedure
 
@@ -501,45 +376,6 @@ Using the `imx-atf` submodule: until we change TF-A, the build can use the
 recipe's own fetch of the same commit (plus its patch). Once we change
 TF-A, `meta-adtf` points the recipe at the submodule (Q13).
 
-## Submodule commands
-
-Not yet run. The human project owner runs these (D7). All from the repo
-root.
-
-Add Linux, shallow, and protected against accidental deep clones:
-
-```
-git clone --depth 1 --branch 6.18-2.1.x-imx \
-    https://github.com/Freescale/linux-fslc.git linux
-git -C linux rev-parse HEAD   # expect 0eb3d176cb8c8ea0d6f6cbb0d39ea4699246b144
-git submodule add https://github.com/Freescale/linux-fslc.git linux
-git config -f .gitmodules submodule.linux.branch 6.18-2.1.x-imx
-git config -f .gitmodules submodule.linux.shallow true
-git config -f .gitmodules submodule.linux.update none
-```
-
-If the branch has moved past `0eb3d176c` by then, check out the recipe's
-commit instead: `git -C linux fetch --depth 1 origin <commit>` and
-`git -C linux checkout <commit>`.
-
-Remove `imx-manifest` and `meta-freescale` (D7, D10):
-
-```
-for s in imx-manifest meta-freescale; do
-    git submodule deinit $s
-    git rm $s
-    rm -rf .git/modules/$s
-done
-```
-
-Then commit `.gitmodules` and the new and removed submodule paths together.
-
-How other people get the submodules after cloning this repo:
-
-```
-git submodule update --init
-git submodule update --init --depth 1 --checkout linux   # only if needed
-```
 
 ## Build instructions
 
