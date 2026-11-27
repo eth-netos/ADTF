@@ -63,6 +63,75 @@ D6. **The NXP EULA is never accepted in this repository** (resolves Q1).
     SDMA, HDMI, EPDC, …) that get unpacked under the same EULA, even though
     only the DDR files are installed.
 
+D7. **Which repos are submodules** (resolves Q3). The human project owner
+adds and removes submodules; agents only propose the commands. All
+paths are relative to the repo root.
+
+- **Source code we modify:** submodule, built through an override in
+  `meta-adtf` (D8): `imx-atf`, `linux`.
+- **Layers and BitBake, unmodified:** submodule, only to pin the exact
+  version: `bitbake`, `openembedded-core`, `meta-yocto` (if poky, Q4),
+  `meta-freescale`.
+- **Recipe sources we don't modify:** downloaded by BitBake: U-Boot,
+  `imx-mkimage`, OP-TEE, the firmware, GCC, BusyBox and so on.
+- **Reference only:** not a submodule: `imx-manifest`.
+
+Layers have to be on disk because BitBake reads them from local
+directories and never downloads them. Submodules (rather than `repo` or
+`bitbake-setup`) record in each parent commit which layer versions it
+was tested with. `imx-manifest` is not read by BitBake at all; we only
+use it as a reference for which versions go together, which is recorded
+in this document (`imx-6.18.37-2.1.0.xml`, commit `66a5b81`).
+Submodules that are large or only needed for building are marked
+`shallow = true` in `.gitmodules`, and `linux` also gets `update = none`
+(see "Submodule commands" for why).
+
+D8. **Our own layer `meta-adtf/`** at the repo root holds everything we
+change about the build, so that `meta-freescale` and the other layers
+stay unmodified:
+
+```
+meta-adtf/
+  conf/layer.conf                        # declares the layer
+  conf/fragments/board/imx93-frdm.conf   # committed build config
+  recipes-bsp/imx-atf/imx-atf_%.bbappend
+  recipes-kernel/linux/linux-fslc-imx_%.bbappend
+```
+
+- `.bbappend` files point recipes at our submodules.
+- The fragment `adtf/board/imx93-frdm` holds the build configuration
+  that everyone shares: `MACHINE`, `DISTRO`, the license policy
+  (`INCOMPATIBLE_LICENSE` and its two exceptions from D1), and removing
+  the Wi-Fi machine features (and `optee`, if Q12 goes that way).
+- Only per-person settings live in the ignored build directory:
+  thread counts and cache paths in `conf/local.conf`, and the person's
+  own EULA acceptance in `conf/toolcfg.conf` (D6).
+- Fragments are parsed after `local.conf` (`bitbake.conf` line 822 vs.
+  817), so plain `=` assignments in the fragment win over `local.conf`.
+  Settings people may want to tune use `?=` in the fragment.
+- `layer.conf` computes the repo root from its own location, so nothing
+  committed contains an absolute path:
+
+  ```
+  ADTF_REPO_ROOT := "${@os.path.normpath(d.getVar('LAYERDIR') + '/..')}"
+  ```
+
+D9. **Linux is built with `externalsrc` from the `linux` submodule:**
+
+```
+# meta-adtf/recipes-kernel/linux/linux-fslc-imx_%.bbappend
+inherit externalsrc
+EXTERNALSRC = "${ADTF_REPO_ROOT}/linux"
+```
+
+The submodule tracks `https://github.com/Freescale/linux-fslc`, branch
+`6.18-2.1.x-imx`, starting at the commit the recipe pins (`0eb3d176c`,
+Linux 6.18.65). `externalsrc` builds directly from the working tree,
+including uncommitted changes, and skips BitBake's own fetch, unpack
+and patch steps. That avoids a second multi-GB copy of the kernel in
+`DL_DIR`, which a `git://…;protocol=file` URL would create. (Not yet
+tested.)
+
 ## Verified facts
 
 Checked by an agent on 2026-11-26. Facts about `meta-freescale` refer to
@@ -113,9 +182,15 @@ Source repos are on GitHub. OP-TEE is included because `optee` is in the
 NXP BSP's `MACHINE_FEATURES`.
 
 Notes:
-- The `imx-atf` recipe in `meta-freescale` pins **exactly the commit our
-  submodule is on** (`af9eb2c17`), so the default build uses the same TF-A
-  source.
+- The `imx-atf` recipe in `meta-freescale` fetches the same commit as our
+  submodule (`af9eb2c17`), but then applies
+  `0001-feat-imx952-support-full-system-power-control-option.patch` on
+  top. Judging by its name it targets the i.MX952, but the TF-A that gets
+  built is not exactly the submodule's contents (see Q13).
+- The kernel recipe `linux-fslc-imx` sets `SRC_URI` directly. TF-A, U-Boot,
+  `imx-mkimage` and OP-TEE set their source URL with `?=` (`ATF_SRC`,
+  `UBOOT_SRC`, `IMX_MKIMAGE_SRC`, `OPTEE_OS_SRC`), so it can be replaced
+  without editing `meta-freescale`.
 - With the NXP BSP, `MACHINE_FEATURES` also includes `nxpiw612-sdio` and
   `nxpwifi-all-sdio`, which bring in `firmware-nxp-wifi`
   (`LicenseRef-Proprietary`). This is not covered by D1 and must be kept
@@ -159,6 +234,52 @@ Notes:
     in `recipes-graphics/devil` "Taken from meta-imx", a note on a
     `imx-seco-libs` patch, a comment in `imx-base.inc`, and the NXP SCR
     text file `SCR/SCR-6.6.3-1.0.0.txt`.
+
+### How the tools fit together
+
+- **BitBake** is the build engine: it parses configuration and recipes
+  from the layers listed in `conf/bblayers.conf` (local directories),
+  builds a task graph, runs the tasks in parallel and reuses earlier
+  results from the sstate cache. Recipe tasks (`do_fetch`) download source
+  code; layers themselves are never downloaded by BitBake.
+- **`repo`** (Google's multi-repository tool) only checks out git
+  repositories listed in a manifest XML such as `imx-manifest`'s. It knows
+  nothing about BitBake, and BitBake does not know about it. NXP uses it to
+  put the right layer versions on disk. **`bitbake-setup`** (in
+  `bitbake/bin` at `yocto-6.0.2`) does the same from a JSON configuration.
+  We use submodules instead (D7).
+- `oe-init-build-env` finds BitBake at `openembedded-core/bitbake` or, if
+  that does not exist, `openembedded-core/../bitbake`
+  (`scripts/oe-buildenv-internal`). With both as submodules at the repo
+  root, the second case applies.
+
+### Shallow submodules
+
+Tested by an agent on 2026-11-27 with a throwaway parent repo and the
+`bitbake` (GitHub) and `meta-yocto` (git.yoctoproject.org) repos, pinned to
+`yocto-6.0.2`, which is not the tip of their branches:
+
+- `git submodule add --depth 1 -b <branch> …` fails ("'origin/2.18' is not
+  a commit"). Cloning with `git clone --depth 1 --branch <tag>` first and
+  then running `git submodule add <url> <path>` on the existing clone
+  works.
+- With `shallow = true` in `.gitmodules`:
+  - `git clone --recurse-submodules` and
+    `git submodule update --init --depth 1` give 1-commit clones.
+  - A plain `git submodule update --init` makes a depth-1 clone of the
+    remote's *default branch* and then fetches the pinned commit *with its
+    full history* if it is not part of that clone (`bitbake`: 9533
+    commits).
+- `update = none` in `.gitmodules` makes a plain `git submodule update`
+  skip the submodule ("Skipping submodule"). An explicit
+  `git submodule update --init --depth 1 --checkout <path>` still works and
+  gives a 1-commit clone.
+- Both servers allow fetching a commit by its hash with `--depth 1`.
+
+This matters for `linux`: the default branch of `Freescale/linux-fslc` is
+`7.2.x+fslc`, so a plain `git submodule update --init` would download the
+full history of `6.18-2.1.x-imx` (several GB). Hence `update = none` for
+`linux` (D7).
 
 ### Container and host tools
 
@@ -213,31 +334,37 @@ Not yet executed. Pending answers to the open questions.
    - `meta-yocto`, at tag `yocto-6.0.2`, for the `poky` distro (MIT).
      Optional (see Q4).
    - `meta-freescale`, branch `wrynose` (D5).
+   - `meta-adtf`, our own layer (D8).
 
    No `meta-imx`, `meta-nxp-*`, `meta-qt6`, `meta-browser` and so on.
    `meta-openembedded` and `meta-arm` are not needed for a minimal image.
    They are only added if parsing shows they are required.
-2. **Fetching layers.** Either as further git submodules of this repo, or
-   with `repo` and our own MIT manifest derived from `imx-manifest` that
-   lists only the layers above (see Q3).
+2. **Fetching layers:** as git submodules of this repo (D7), see
+   "Submodule commands".
 3. **Directory layout:** the build directory (with `conf/` and `tmp/`) is
    `yocto-build/imx93-frdm` in this repo, ignored by `.gitignore` (D6).
    Downloads and sstate are shared between build directories and kept
    outside the repo: `~/yocto-cache/downloads` (`DL_DIR`) and
    `~/yocto-cache/sstate-cache` (`SSTATE_DIR`).
-4. **`local.conf`** (sketch):
+4. **Configuration** (sketch). Committed, in the fragment
+   `meta-adtf/conf/fragments/board/imx93-frdm.conf` (D8):
 
    ```
    MACHINE = "imx93-11x11-lpddr4x-frdm"
    DISTRO = "poky"
+   MACHINE_FEATURES:remove = "nxpiw612-sdio nxpwifi-all-sdio"
+   INCOMPATIBLE_LICENSE = "LicenseRef-Proprietary"
+   # plus exceptions for exactly the two firmware recipes from D1
+   INHERIT += "rm_work"
+   ```
+
+   Per person, in the build directory's `conf/local.conf`:
+
+   ```
    DL_DIR = "/home/ubuntu/yocto-cache/downloads"
    SSTATE_DIR = "/home/ubuntu/yocto-cache/sstate-cache"
    BB_NUMBER_THREADS = "12"
    PARALLEL_MAKE = "-j 12"
-   INHERIT += "rm_work"
-   MACHINE_FEATURES:remove = "nxpiw612-sdio nxpwifi-all-sdio"
-   INCOMPATIBLE_LICENSE = "LicenseRef-Proprietary"
-   # plus exceptions for exactly the two firmware recipes from D1
    ```
 5. **Check before the long build.** Run a parse and dependency-graph pass
    (`bitbake -p`, `bitbake -g core-image-minimal`), and from it list every
@@ -255,31 +382,94 @@ Not yet executed. Pending answers to the open questions.
    `imx-boot` / `flash.bin`. Flash to microSD with `bmaptool`, or to eMMC
    with `uuu`, from outside the container (Q8).
 
-Using the `imx-atf` submodule: the first build uses the recipe's own fetch
-of the identical commit. Once we change TF-A, we point the recipe at the
-submodule (e.g. with `externalsrc` or a `.bbappend` that sets
-`SRC_URI`/`SRCREV`).
+Using the `imx-atf` submodule: until we change TF-A, the build can use the
+recipe's own fetch of the same commit (plus its patch). Once we change
+TF-A, `meta-adtf` points the recipe at the submodule (Q13).
+
+## Submodule commands
+
+Not yet run. The human project owner runs these (D7). All from the repo
+root.
+
+Add the layers and BitBake, shallow, at `yocto-6.0.2`:
+
+```
+git clone --depth 1 --branch yocto-6.0.2 \
+    https://github.com/openembedded/bitbake.git bitbake
+git submodule add https://github.com/openembedded/bitbake.git bitbake
+git config -f .gitmodules submodule.bitbake.branch 2.18
+
+git clone --depth 1 --branch yocto-6.0.2 \
+    https://github.com/openembedded/openembedded-core.git openembedded-core
+git submodule add https://github.com/openembedded/openembedded-core.git \
+    openembedded-core
+git config -f .gitmodules submodule.openembedded-core.branch wrynose
+
+# only for DISTRO = "poky" (Q4)
+git clone --depth 1 --branch yocto-6.0.2 \
+    https://git.yoctoproject.org/meta-yocto meta-yocto
+git submodule add https://git.yoctoproject.org/meta-yocto meta-yocto
+git config -f .gitmodules submodule.meta-yocto.branch wrynose
+
+for s in bitbake openembedded-core meta-yocto; do
+    git config -f .gitmodules submodule.$s.shallow true
+done
+```
+
+Add Linux, shallow, and protected against accidental deep clones:
+
+```
+git clone --depth 1 --branch 6.18-2.1.x-imx \
+    https://github.com/Freescale/linux-fslc.git linux
+git -C linux rev-parse HEAD   # expect 0eb3d176cb8c8ea0d6f6cbb0d39ea4699246b144
+git submodule add https://github.com/Freescale/linux-fslc.git linux
+git config -f .gitmodules submodule.linux.branch 6.18-2.1.x-imx
+git config -f .gitmodules submodule.linux.shallow true
+git config -f .gitmodules submodule.linux.update none
+```
+
+If the branch has moved past `0eb3d176c` by then, check out the recipe's
+commit instead: `git -C linux fetch --depth 1 origin <commit>` and
+`git -C linux checkout <commit>`.
+
+Remove `imx-manifest` (D7):
+
+```
+git submodule deinit imx-manifest
+git rm imx-manifest
+rm -rf .git/modules/imx-manifest
+```
+
+Then commit `.gitmodules` and the new and removed submodule paths together.
+
+How other people get the submodules after cloning this repo:
+
+```
+git submodule update --init --depth 1
+git submodule update --init --depth 1 --checkout linux   # only if needed
+```
 
 ## Build instructions
 
-Incomplete: the layer checkout depends on Q3 and the distro on Q4, and
-none of this has been run yet. Below, `$LAYERS` is the directory that holds
-the checkouts of `bitbake`, `openembedded-core` and `meta-yocto` (not yet
-decided, see Q3). All commands run from the root of this repo.
+Incomplete: the distro depends on Q4, `meta-adtf` does not exist yet, and
+none of this has been run yet. All commands run from the root of this repo.
 
 Set up the build directory (once). Because `/opt/bitbake` is on `PATH` and
 is the wrong BitBake version, `oe-init-build-env` must be used, which puts
-`$LAYERS/bitbake/bin` first:
+`bitbake/bin` first:
 
 ```
-source $LAYERS/openembedded-core/oe-init-build-env yocto-build/imx93-frdm
+source openembedded-core/oe-init-build-env yocto-build/imx93-frdm
 bitbake-layers add-layer ../../meta-freescale
-bitbake-layers add-layer $LAYERS/meta-yocto/meta-poky   # only for poky, Q4
+bitbake-layers add-layer ../../meta-yocto/meta-poky   # only for poky, Q4
+bitbake-layers add-layer ../../meta-adtf
+bitbake-config-build enable-fragment adtf/board/imx93-frdm
 ```
 
 `oe-init-build-env` changes into the build directory. In a new shell, run
-the `source` line again to get back into it. Then edit `conf/local.conf` as
-in step 4 of the proposed build procedure.
+the `source` line again to get back into it. Then put the per-person
+settings from step 4 of the proposed build procedure into
+`conf/local.conf`.
 
 1. Accept the NXP EULA for this build directory, only if you have read
    `meta-freescale/EULA` and accept it yourself (D6):
@@ -304,10 +494,6 @@ in step 4 of the proposed build procedure.
 The images end up in `tmp/deploy/images/imx93-11x11-lpddr4x-frdm/`.
 
 ## Open questions
-
-Q3. **How to fetch the other layers:** git submodules (consistent with the
-    rest of this repo, recorded in git history) or `repo` with our own
-    trimmed manifest? Proposal: submodules.
 
 Q4. **Distro:** `poky` (needs `meta-yocto`, well tested) or `nodistro`
     (OE-core only, fewer layers)? Proposal: `poky`.
@@ -353,3 +539,14 @@ Q12. **OP-TEE recipe files copied from `meta-imx`.** Five `.inc` files in
      (b) accept them as part of `meta-freescale` (MIT); (c) ask the
      `meta-freescale` maintainers about their provenance. Proposal: (a) for
      the first image.
+
+Q13. **How to build TF-A from the `imx-atf` submodule:** `externalsrc` (as
+     for Linux, D9; builds uncommitted changes; skips the recipe's patch)
+     or replacing the source URL in a `.bbappend`
+     (`ATF_SRC = "git://${ADTF_REPO_ROOT}/imx-atf;protocol=file"` plus
+     `SRCREV`; builds only committed changes; applies the recipe's patch,
+     which may conflict with our changes; needs our commits on the
+     submodule's branch `lf_v2.14`, or `SRCBRANCH`/`nobranch=1` set)?
+     With the second option, `SRCREV` could be read from the submodule at
+     parse time, so the parent repo's submodule pointer is the only record
+     of the commit.
