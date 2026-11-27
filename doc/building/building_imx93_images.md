@@ -406,6 +406,12 @@ with exactly this command (a plain `git submodule update --init` or
 git submodule update --init --depth 1 --checkout linux
 ```
 
+Tested on a fresh clone of this repo on 2026-11-27: one commit at
+`0eb3d176c`, 70 s, 500 MB of git data. That is more than the 290 MB of a
+direct `git clone --depth 1 --branch 6.18-2.1.x-imx`, probably because
+git first clones the remote's default branch (`7.2.x+fslc`) at depth 1 and
+then fetches our commit, so it downloads two kernel snapshots.
+
 **Directory layout** (D10): top directory `~/yocto-builds`, setup
 directory `~/yocto-builds/imx93-frdm` with `layers/`, `build/` and
 `config/`; downloads in `~/yocto-builds/.bitbake-setup-downloads` and
