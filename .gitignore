@@ -5,7 +5,9 @@ __pycache__/
 # it cannot write to its own install location (e.g. the read-only
 # /opt/bitbake in the sandbox container).
 pyshtables.py
-# Yocto build directories (see doc/building/building_imx93_images.md). They
-# hold per-user settings such as conf/toolcfg.conf, which records the
-# person's own acceptance of the NXP EULA, and must never be committed.
-/yocto-build/
+# Default top directory of bitbake-setup when it is run from the repo root
+# without the top-dir settings (see doc/building/building_imx93_images.md).
+# It holds build directories with per-user settings such as
+# conf/toolcfg.conf, which records the person's own acceptance of the NXP
+# EULA, and must never be committed.
+/bitbake-builds/

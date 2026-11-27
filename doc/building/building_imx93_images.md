@@ -54,8 +54,13 @@ D6. **The NXP EULA is never accepted in this repository** (resolves Q1).
     `bitbake-config-build enable-fragment` writes only
     `<build-dir>/conf/toolcfg.conf` (its default `--confpath`, which
     `openembedded-core/meta/conf/bitbake.conf` includes). The build
-    directory is `yocto-build/` in this repo, which `.gitignore` excludes,
-    so the acceptance cannot be committed by accident.
+    directory is outside this repo (`~/yocto-builds/imx93-frdm/build`,
+    D10), and `.gitignore` excludes `bitbake-builds/`, where
+    `bitbake-setup` would put it if run from the repo root without the
+    top-directory settings, so the acceptance cannot be committed by
+    accident. `bitbake-setup update` regenerates `conf/` when the
+    configuration changed (keeping the old one as `conf-backup-<time>`),
+    so the fragment may have to be enabled again after an update.
     Two consequences of how `meta-freescale/classes/fsl-eula-unpack.bbclass`
     checks `ACCEPT_FSL_EULA`: the check is in `do_unpack`, so the NXP
     archives are already *downloaded* (`do_fetch`) before acceptance is
@@ -72,11 +77,10 @@ agents only propose the commands. All paths are relative to the repo root.
   `meta-adtf` (D8): `imx-atf`, `linux`.
 - **Our own layer:** committed directly in this repo: `meta-adtf` (D8).
 - **Layers and BitBake, unmodified:** not submodules. A layer setup tool
-  puts them on disk at pinned versions (`repo` or `bitbake-setup`, Q14):
+  puts them on disk at pinned versions (`bitbake-setup`, D10):
   `bitbake`, `openembedded-core`, `meta-yocto` (if poky, Q4),
-  `meta-freescale`. The existing `meta-freescale` submodule is removed
-  once Q14 is settled; its branch choice (D5) moves into the tool's
-  configuration.
+  `meta-freescale`. The existing `meta-freescale` submodule is removed;
+  its branch choice (D5) moves into the `bitbake-setup` configuration.
 - **Recipe sources we don't modify:** downloaded by BitBake: U-Boot,
   `imx-mkimage`, OP-TEE, the firmware, GCC, BusyBox and so on.
 - **Reference only:** not a submodule: `imx-manifest`.
@@ -133,6 +137,63 @@ including uncommitted changes, and skips BitBake's own fetch, unpack
 and patch steps. That avoids a second multi-GB copy of the kernel in
 `DL_DIR`, which a `git://…;protocol=file` URL would create. (Not yet
 tested.)
+
+D10. **Layers are set up with `bitbake-setup`** (resolves Q14), from our
+own configuration file committed at
+`meta-adtf/bitbake-setup/imx93-frdm.conf.json`, with the top directory
+`~/yocto-builds` outside this repo.
+
+- The configuration pins every source to an exact commit (the
+  `yocto-6.0.2` commits for `bitbake`, `openembedded-core` and
+  `meta-yocto`; `meta-freescale` `wrynose` at `89e6e24b5`, D5). Moving to
+  newer commits is a deliberate edit of this file.
+- `meta-adtf` is added with `bb-layers-file-relative: [".."]`, which
+  `bitbake-setup` resolves relative to the configuration file, so nothing
+  committed contains an absolute path. This only works when the
+  configuration is given as a local file (not from a registry or URL).
+- The setup directory is `~/yocto-builds/imx93-frdm`, with `layers/`,
+  `build/` and `config/`. Layer clones, recipe downloads and sstate are
+  shared under `~/yocto-builds` (`.bitbake-setup-downloads`,
+  `.sstate-cache`, written into `~/yocto-builds/site.conf`).
+- Per-person settings that should survive `bitbake-setup update` go into
+  `~/yocto-builds/site.conf` (created once, never overwritten) rather
+  than the build directory's `conf/local.conf`.
+- Sketch of the configuration (not yet written or tested):
+
+```
+{
+  "description": "ADTF: FRDM i.MX93 image, Yocto 6.0 wrynose",
+  "sources": {
+    "bitbake": {"git-remote": {
+      "remotes": {"origin": {"uri": "https://github.com/openembedded/bitbake"}},
+      "branch": "2.18",
+      "rev": "acfe02fa38b5da9e6a36c6cedcf91d4fcbefbfbd"}},
+    "openembedded-core": {"git-remote": {
+      "remotes": {"origin":
+        {"uri": "https://github.com/openembedded/openembedded-core"}},
+      "branch": "wrynose",
+      "rev": "5d1aa5c806c061a2994f4decb59016610f093213"}},
+    "meta-yocto": {"git-remote": {
+      "remotes": {"origin": {"uri": "https://git.yoctoproject.org/meta-yocto"}},
+      "branch": "wrynose",
+      "rev": "24c24cef5d1523fefe43a3e3d34667b37ae551f3"}},
+    "meta-freescale": {"git-remote": {
+      "remotes": {"origin":
+        {"uri": "https://github.com/Freescale/meta-freescale"}},
+      "branch": "wrynose",
+      "rev": "89e6e24b57d513dced917e5aaadcf855a700ca7f"}}
+  },
+  "bitbake-setup": {"configurations": [{
+    "name": "imx93-frdm",
+    "description": "core-image-minimal for imx93-11x11-lpddr4x-frdm",
+    "bb-layers": ["openembedded-core/meta", "meta-yocto/meta-poky",
+                  "meta-freescale"],
+    "bb-layers-file-relative": [".."],
+    "oe-fragments": ["adtf/board/imx93-frdm"],
+    "setup-dir-name": "imx93-frdm"
+  }]}
+}
+```
 
 ## Verified facts
 
@@ -249,7 +310,7 @@ Notes:
   nothing about BitBake, and BitBake does not know about it. NXP uses it to
   put the right layer versions on disk. **`bitbake-setup`** (in
   `bitbake/bin` at `yocto-6.0.2`) does the same from a JSON configuration,
-  and also creates the build directory (Q14).
+  and also creates the build directory (D10).
 - `oe-init-build-env` finds BitBake at `openembedded-core/bitbake` or, if
   that does not exist, `openembedded-core/../bitbake`
   (`scripts/oe-buildenv-internal`).
@@ -395,13 +456,12 @@ Not yet executed. Pending answers to the open questions.
    No `meta-imx`, `meta-nxp-*`, `meta-qt6`, `meta-browser` and so on.
    `meta-openembedded` and `meta-arm` are not needed for a minimal image.
    They are only added if parsing shows they are required.
-2. **Fetching layers:** with `repo` or `bitbake-setup` (D7, Q14). Only
-   `imx-atf` and `linux` are submodules ("Submodule commands").
-3. **Directory layout:** the build directory (with `conf/` and `tmp/`) is
-   `yocto-build/imx93-frdm` in this repo, ignored by `.gitignore` (D6).
-   Downloads and sstate are shared between build directories and kept
-   outside the repo: `~/yocto-cache/downloads` (`DL_DIR`) and
-   `~/yocto-cache/sstate-cache` (`SSTATE_DIR`).
+2. **Fetching layers:** with `bitbake-setup` (D7, D10). Only `imx-atf` and
+   `linux` are submodules ("Submodule commands").
+3. **Directory layout** (D10): top directory `~/yocto-builds`, setup
+   directory `~/yocto-builds/imx93-frdm` with `layers/`, `build/` and
+   `config/`; downloads in `~/yocto-builds/.bitbake-setup-downloads` and
+   sstate in `~/yocto-builds/.sstate-cache`, shared by all setups.
 4. **Configuration** (sketch). Committed, in the fragment
    `meta-adtf/conf/fragments/board/imx93-frdm.conf` (D8):
 
@@ -414,11 +474,10 @@ Not yet executed. Pending answers to the open questions.
    INHERIT += "rm_work"
    ```
 
-   Per person, in the build directory's `conf/local.conf`:
+   Per person, in `~/yocto-builds/site.conf`, below the `DL_DIR` and
+   `SSTATE_DIR` lines that `bitbake-setup` writes there:
 
    ```
-   DL_DIR = "/home/ubuntu/yocto-cache/downloads"
-   SSTATE_DIR = "/home/ubuntu/yocto-cache/sstate-cache"
    BB_NUMBER_THREADS = "12"
    PARALLEL_MAKE = "-j 12"
    ```
@@ -463,13 +522,14 @@ If the branch has moved past `0eb3d176c` by then, check out the recipe's
 commit instead: `git -C linux fetch --depth 1 origin <commit>` and
 `git -C linux checkout <commit>`.
 
-Remove `imx-manifest` (D7), and `meta-freescale` once Q14 is settled:
+Remove `imx-manifest` and `meta-freescale` (D7, D10):
 
 ```
-git submodule deinit imx-manifest
-git rm imx-manifest
-rm -rf .git/modules/imx-manifest
-# later, the same three commands with meta-freescale
+for s in imx-manifest meta-freescale; do
+    git submodule deinit $s
+    git rm $s
+    rm -rf .git/modules/$s
+done
 ```
 
 Then commit `.gitmodules` and the new and removed submodule paths together.
@@ -483,33 +543,43 @@ git submodule update --init --depth 1 --checkout linux   # only if needed
 
 ## Build instructions
 
-Incomplete: how the layers get on disk depends on Q14 and the distro on
-Q4, `meta-adtf` does not exist yet, and none of this has been run yet.
-Below, `$LAYERS` is the directory where the layer setup tool puts
-`bitbake`, `openembedded-core`, `meta-yocto` and `meta-freescale`. All
-commands run from the root of this repo. With `bitbake-setup`, the tool
-creates the build directory itself, so these setup lines change and the
-build directory may move (it must stay ignored by git, D6).
+Incomplete: the distro depends on Q4, `meta-adtf` (with its
+`bitbake-setup` configuration) does not exist yet, and none of this has
+been run yet.
 
-Set up the build directory (once). Because `/opt/bitbake` is on `PATH` and
-is the wrong BitBake version, `oe-init-build-env` must be used, which puts
-`$LAYERS/bitbake/bin` first:
+Once per person, tell `bitbake-setup` where the top directory is (stored
+in `~/.config/bitbake-setup/settings.conf`):
 
 ```
-source $LAYERS/openembedded-core/oe-init-build-env yocto-build/imx93-frdm
-bitbake-layers add-layer $LAYERS/meta-freescale
-bitbake-layers add-layer $LAYERS/meta-yocto/meta-poky   # only for poky, Q4
-bitbake-layers add-layer ../../meta-adtf
-bitbake-config-build enable-fragment adtf/board/imx93-frdm
+bitbake-setup settings set --global default top-dir-prefix "$HOME"
+bitbake-setup settings set --global default top-dir-name yocto-builds
 ```
 
-`oe-init-build-env` changes into the build directory. In a new shell, run
-the `source` line again to get back into it. Then put the per-person
-settings from step 4 of the proposed build procedure into
-`conf/local.conf`.
+Set up the layers and the build directory (once), from the root of this
+repo. `/opt/bitbake/bin/bitbake-setup` (BitBake master, on `PATH`) is used
+to run this; the setup itself uses the BitBake revision from the
+configuration (not yet tested):
+
+```
+bitbake-setup init --non-interactive \
+    meta-adtf/bitbake-setup/imx93-frdm.conf.json
+```
+
+This clones the layers into `~/yocto-builds/imx93-frdm/layers`, writes
+`bblayers.conf`, and enables the fragment `adtf/board/imx93-frdm`. Then,
+in every new shell:
+
+```
+source ~/yocto-builds/imx93-frdm/build/init-build-env
+```
+
+It puts the right BitBake first on `PATH` (ahead of `/opt/bitbake`) and
+changes into the build directory. Put the per-person settings from step 4
+of the proposed build procedure into `~/yocto-builds/site.conf`.
 
 1. Accept the NXP EULA for this build directory, only if you have read
-   `meta-freescale/EULA` and accept it yourself (D6):
+   `~/yocto-builds/imx93-frdm/layers/meta-freescale/EULA` and accept it
+   yourself (D6):
 
    ```
    bitbake-config-build enable-fragment freescale-layer/eula/accept-fsl-eula
@@ -587,17 +657,3 @@ Q13. **How to build TF-A from the `imx-atf` submodule:** `externalsrc` (as
      With the second option, `SRCREV` could be read from the submodule at
      parse time, so the parent repo's submodule pointer is the only record
      of the commit.
-
-Q14. **Layer setup tool: `repo` or `bitbake-setup`?** (See "Layer setup
-     tools".) `bitbake-setup` is part of BitBake, also creates the build
-     directory and enables fragments, shares layer clones, downloads and
-     sstate between setups, records the exact revisions in a git repo, and
-     `meta-freescale` ships a configuration for it that we could adapt
-     (dropping the layers we don't need). It is newer, so its interface
-     may still change, and its default layout (`<top>/<setup>/layers`,
-     `build`, `config`) replaces our `yocto-build/` plan. `repo` is mature
-     and NXP's standard, but needs our own manifest, a separate
-     build-directory setup, and explicit mirrors for sharing. Proposal:
-     `bitbake-setup`, with our own JSON configuration committed in this
-     repo (e.g. `meta-adtf/bitbake-setup/imx93-frdm.conf.json`) and the top
-     directory outside the repo (e.g. `~/yocto-builds`).
