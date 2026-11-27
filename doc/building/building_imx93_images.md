@@ -65,7 +65,7 @@ Addition of git submodules can be done by the agent if the human project
 owner asks for it explicitly.
 
 - **Source code we modify:** submodule, built through an override in
-  `meta-adtf` (D8): `imx-atf`, and later `linux` (not added yet).
+  `meta-adtf` (D8): `imx-atf`, `linux`.
 - **Our own layer:** committed directly in this repo: `meta-adtf` (D8).
 - **Layers and BitBake, unmodified:** not submodules. A layer setup tool
   puts them on disk at pinned versions (`bitbake-setup`, D10):
@@ -78,8 +78,8 @@ Layers have to be on disk because BitBake reads them from local
 directories and never downloads them. `imx-manifest` is not read by BitBake
 at all; we only use it as a reference for which versions go together,
 which is recorded in this document (`imx-6.18.37-2.1.0.xml`, commit
-`66a5b81`). The `linux` submodule, once added, is marked `shallow = true`
-and `update = none` in `.gitmodules` (see "Shallow submodules" for why).
+`66a5b81`). The `linux` submodule is marked `shallow = true` and
+`update = none` in `.gitmodules` (see "Shallow submodules" for why).
 
 D8. **Our own layer `meta-adtf/`** at the repo root holds everything we
 change about the build, so that `meta-freescale` and the other layers
@@ -126,8 +126,26 @@ The submodule tracks `https://github.com/Freescale/linux-fslc`, branch
 Linux 6.18.65). `externalsrc` builds directly from the working tree,
 including uncommitted changes, and skips BitBake's own fetch, unpack
 and patch steps. That avoids a second multi-GB copy of the kernel in
-`DL_DIR`, which a `git://…;protocol=file` URL would create. (Not yet
-tested.)
+`DL_DIR`, which a `git://…;protocol=file` URL would create. (Building
+with it is not yet tested.)
+
+Added by an agent on 2026-11-27, at the human project owner's request:
+
+```
+git clone --depth 1 --branch 6.18-2.1.x-imx \
+    https://github.com/Freescale/linux-fslc.git linux
+git submodule add https://github.com/Freescale/linux-fslc.git linux
+git config -f .gitmodules submodule.linux.branch 6.18-2.1.x-imx
+git config -f .gitmodules submodule.linux.shallow true
+git config -f .gitmodules submodule.linux.update none
+git submodule absorbgitdirs linux
+```
+
+`git submodule add --depth 1 -b 6.18-2.1.x-imx …` does not work: its
+shallow clone only fetches the default branch `7.2.x+fslc`, so the branch
+is not found. The `git clone` took 53 s and received 99264 objects,
+277 MiB (at 16 MiB/s); the result is 290 MB of git data and 1.8 GB in
+total on disk.
 
 D10. **Layers are set up with `bitbake-setup`** (resolves Q14), from our
 own configuration file committed at
@@ -349,10 +367,16 @@ Tested by an agent on 2026-11-27 with a throwaway parent repo and the
     remote's *default branch* and then fetches the pinned commit *with its
     full history* if it is not part of that clone (`bitbake`: 9533
     commits).
+- `.gitmodules` has no setting that makes a plain `git submodule init` /
+  `update` shallow in that case: the `branch` setting is ignored for the
+  initial clone (tested again with the pin at the tip of a non-default
+  branch, like `linux`: 9555 commits).
 - `update = none` in `.gitmodules` makes a plain `git submodule update`
-  skip the submodule ("Skipping submodule"). An explicit
+  and `git clone --recurse-submodules` skip the submodule ("Skipping
+  submodule"). An explicit
   `git submodule update --init --depth 1 --checkout <path>` still works and
-  gives a 1-commit clone.
+  gives a 1-commit clone. Without `--depth 1`, that command would fetch
+  the full history (same mechanism as above; not tested separately).
 - Both servers allow fetching a commit by its hash with `--depth 1`.
 
 This matters for `linux`: the default branch of `Freescale/linux-fslc` is
@@ -373,6 +397,14 @@ been run. Commands run from the root of this repo unless stated otherwise.
 `meta-nxp-*`, `meta-qt6`, `meta-browser` and so on. `meta-openembedded`
 and `meta-arm` are not needed for a minimal image; they are only added if
 parsing shows they are required.
+
+**Linux source** (D9): after cloning this repo, get the `linux` submodule
+with exactly this command (a plain `git submodule update --init` or
+`git clone --recurse-submodules` skips it, see "Shallow submodules"):
+
+```
+git submodule update --init --depth 1 --checkout linux
+```
 
 **Directory layout** (D10): top directory `~/yocto-builds`, setup
 directory `~/yocto-builds/imx93-frdm` with `layers/`, `build/` and

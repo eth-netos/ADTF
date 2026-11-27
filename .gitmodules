@@ -8,3 +8,9 @@
 	path = imx-atf
 	url = https://github.com/nxp-imx/imx-atf.git
 	branch = lf_v2.14
+[submodule "linux"]
+	path = linux
+	url = https://github.com/Freescale/linux-fslc.git
+	branch = 6.18-2.1.x-imx
+	shallow = true
+	update = none
