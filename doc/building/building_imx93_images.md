@@ -474,6 +474,12 @@ sstate in `~/yocto-builds/.sstate-cache`, shared by all setups.
    INHERIT += "rm_work"
    ```
 
+   `rm_work` (`openembedded-core/meta/classes/rm_work.bbclass`) deletes
+   each recipe's work directory (unpacked sources and build objects, but
+   not its `temp/` logs) once the recipe is built. It saves tens of GB.
+   Recipes listed in `RM_WORK_EXCLUDE` keep theirs; `externalsrc` adds its
+   recipe there automatically, so the Linux build (D9) is kept.
+
    Per person, in `~/yocto-builds/site.conf`, below the `DL_DIR` and
    `SSTATE_DIR` lines that `bitbake-setup` writes there:
 
@@ -509,14 +515,27 @@ sstate in `~/yocto-builds/.sstate-cache`, shared by all setups.
    bitbake core-image-minimal 2>&1 | tee build-core-image-minimal.log
    ```
 
-8. **Review licenses after the build**:
-   `tmp/deploy/licenses/<image>/license.manifest` for the rootfs, and the
-   recipes that went into `imx-boot`/`flash.bin`.
+8. **Review licenses after the build**: the rootfs's
 
-**Output:** `tmp/deploy/images/imx93-11x11-lpddr4x-frdm/`, containing
-`core-image-minimal-*.wic.zst` (+ `.bmap`) and the boot image
-`imx-boot` / `flash.bin`. Getting them onto the board is out of scope for
-now (D12).
+   ```
+   ~/yocto-builds/imx93-frdm/build/tmp/deploy/licenses/<image>/license.manifest
+   ```
+
+   and the recipes that went into `imx-boot`/`flash.bin`.
+
+**Output:**
+
+```
+~/yocto-builds/imx93-frdm/build/tmp/deploy/images/imx93-11x11-lpddr4x-frdm/
+```
+
+containing `core-image-minimal-*.wic.zst` (+ `.bmap`) and the boot image
+`imx-boot` / `flash.bin`. The path is `openembedded-core`'s default:
+`TMPDIR ?= "${TOPDIR}/tmp"` (`TOPDIR` is the build directory),
+`DEPLOY_DIR ?= "${TMPDIR}/deploy"` and
+`DEPLOY_DIR_IMAGE ?= "${DEPLOY_DIR}/images/${MACHINE}"`
+(`meta/conf/bitbake.conf`); neither `poky` nor our configuration changes
+it. Getting the images onto the board is out of scope for now (D12).
 
 **Using the `imx-atf` submodule:** until we change TF-A, the build can use
 the recipe's own fetch of the same commit (plus its patch). Once we change
