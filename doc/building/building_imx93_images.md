@@ -63,28 +63,30 @@ D6. **The NXP EULA is never accepted in this repository** (resolves Q1).
     SDMA, HDMI, EPDC, …) that get unpacked under the same EULA, even though
     only the DDR files are installed.
 
-D7. **Which repos are submodules** (resolves Q3). The human project owner
-adds and removes submodules; agents only propose the commands. All
-paths are relative to the repo root.
+D7. **Only code we modify becomes a submodule** (resolves Q3; revised on
+2026-11-27, when the human project owner decided against submodules for
+unmodified code). The human project owner adds and removes submodules;
+agents only propose the commands. All paths are relative to the repo root.
 
 - **Source code we modify:** submodule, built through an override in
   `meta-adtf` (D8): `imx-atf`, `linux`.
-- **Layers and BitBake, unmodified:** submodule, only to pin the exact
-  version: `bitbake`, `openembedded-core`, `meta-yocto` (if poky, Q4),
-  `meta-freescale`.
+- **Our own layer:** committed directly in this repo: `meta-adtf` (D8).
+- **Layers and BitBake, unmodified:** not submodules. A layer setup tool
+  puts them on disk at pinned versions (`repo` or `bitbake-setup`, Q14):
+  `bitbake`, `openembedded-core`, `meta-yocto` (if poky, Q4),
+  `meta-freescale`. The existing `meta-freescale` submodule is removed
+  once Q14 is settled; its branch choice (D5) moves into the tool's
+  configuration.
 - **Recipe sources we don't modify:** downloaded by BitBake: U-Boot,
   `imx-mkimage`, OP-TEE, the firmware, GCC, BusyBox and so on.
 - **Reference only:** not a submodule: `imx-manifest`.
 
 Layers have to be on disk because BitBake reads them from local
-directories and never downloads them. Submodules (rather than `repo` or
-`bitbake-setup`) record in each parent commit which layer versions it
-was tested with. `imx-manifest` is not read by BitBake at all; we only
-use it as a reference for which versions go together, which is recorded
-in this document (`imx-6.18.37-2.1.0.xml`, commit `66a5b81`).
-Submodules that are large or only needed for building are marked
-`shallow = true` in `.gitmodules`, and `linux` also gets `update = none`
-(see "Submodule commands" for why).
+directories and never downloads them. `imx-manifest` is not read by BitBake
+at all; we only use it as a reference for which versions go together,
+which is recorded in this document (`imx-6.18.37-2.1.0.xml`, commit
+`66a5b81`). The `linux` submodule is marked `shallow = true` and
+`update = none` in `.gitmodules` (see "Shallow submodules" for why).
 
 D8. **Our own layer `meta-adtf/`** at the repo root holds everything we
 change about the build, so that `meta-freescale` and the other layers
@@ -246,12 +248,66 @@ Notes:
   repositories listed in a manifest XML such as `imx-manifest`'s. It knows
   nothing about BitBake, and BitBake does not know about it. NXP uses it to
   put the right layer versions on disk. **`bitbake-setup`** (in
-  `bitbake/bin` at `yocto-6.0.2`) does the same from a JSON configuration.
-  We use submodules instead (D7).
+  `bitbake/bin` at `yocto-6.0.2`) does the same from a JSON configuration,
+  and also creates the build directory (Q14).
 - `oe-init-build-env` finds BitBake at `openembedded-core/bitbake` or, if
   that does not exist, `openembedded-core/../bitbake`
-  (`scripts/oe-buildenv-internal`). With both as submodules at the repo
-  root, the second case applies.
+  (`scripts/oe-buildenv-internal`).
+
+### Layer setup tools: `repo` and `bitbake-setup`
+
+Read from the sources by an agent on 2026-11-27 (`bitbake-setup` at
+BitBake `yocto-6.0.2`, `repo` launcher 2.36 in the container). Neither has
+been run here yet.
+
+**`repo`** (Google's tool, used by NXP and Android):
+- Input: a manifest XML listing git repos, remotes, paths and revisions.
+  It can come from a git repo (`repo init -u <url> -m <file>`) or, with
+  `repo init --standalone-manifest -u <url or path to .xml>`, from a single
+  file. We would write our own manifest, modelled on `imx-manifest` but
+  without `meta-imx` and the other NXP layers.
+- Location: the directory where `repo init` is run (the "client"). It
+  keeps manifests and git data in `.repo/` and checks out each project at
+  its manifest `path` (NXP uses `sources/<layer>`).
+- Caching: none between clients by default; each client has its own
+  `.repo/projects`. Sharing needs `repo init --reference <mirror>` or a
+  mirror made with `repo init --mirror`. `clone-depth` per project, or
+  `repo init --depth`, makes shallow clones.
+- It knows nothing about BitBake: the build directory and `bblayers.conf`
+  are set up separately (as NXP does with its `imx-setup-release.sh`).
+- The installed `/usr/bin/repo` is only a launcher. On first use it
+  downloads the actual tool from `gerrit.googlesource.com/git-repo`
+  (reachable, HTTP 200 on 2026-11-27).
+
+**`bitbake-setup`** (part of BitBake, `bitbake/bin/bitbake-setup`):
+- Input: a JSON configuration listing the sources (git remote, branch,
+  revision, path), which layers go into `bblayers.conf`, and which
+  configuration fragments to enable, with choices such as machine and
+  distro. Configurations come from a registry (BitBake ships
+  `default-registry/configurations/`, e.g. `poky-wrynose.conf.json`), a
+  local file (`bitbake-setup init <file.json> …`) or a URL.
+  `meta-freescale` ships one too:
+  `default-registry/configurations/fsl-community-bsp-wrynose.conf.json`.
+- Location: a "top directory", by default `$PWD/bitbake-builds`
+  (settings `top-dir-prefix` and `top-dir-name`, stored in
+  `~/.config/bitbake-setup/settings.conf` or `<top>/settings.conf`). Each
+  setup is a subdirectory `<top>/<setup-name>/` with `layers/` (the
+  checkouts), `build/` (the BitBake build directory, with
+  `init-build-env`) and `config/` (a git repo in which it commits the
+  configuration and the exact revisions it checked out, as
+  `sources-fixed-revisions.json`, on each `init` and `update`).
+- Caching: it fetches layer repos with BitBake's own git fetcher into a
+  shared download directory, `<top>/.bitbake-setup-downloads`, and
+  writes a `<top>/site.conf` that points every build's `DL_DIR` there and,
+  by default (`common-sstate`), `SSTATE_DIR` to `<top>/.sstate-cache`. So
+  all setups under one top directory share layer clones, recipe
+  downloads and sstate.
+- `bitbake-setup init -L <source> <path>` symlinks a local checkout in
+  place of a source, for development. `bitbake-setup status` and
+  `update` check for and apply upstream changes.
+- It needs a BitBake checkout to run from. `/opt/bitbake` (master,
+  BitBake 2.20) is on `PATH` and should be able to set up a wrynose
+  configuration, since its registry includes `poky-wrynose`.
 
 ### Shallow submodules
 
@@ -339,8 +395,8 @@ Not yet executed. Pending answers to the open questions.
    No `meta-imx`, `meta-nxp-*`, `meta-qt6`, `meta-browser` and so on.
    `meta-openembedded` and `meta-arm` are not needed for a minimal image.
    They are only added if parsing shows they are required.
-2. **Fetching layers:** as git submodules of this repo (D7), see
-   "Submodule commands".
+2. **Fetching layers:** with `repo` or `bitbake-setup` (D7, Q14). Only
+   `imx-atf` and `linux` are submodules ("Submodule commands").
 3. **Directory layout:** the build directory (with `conf/` and `tmp/`) is
    `yocto-build/imx93-frdm` in this repo, ignored by `.gitignore` (D6).
    Downloads and sstate are shared between build directories and kept
@@ -391,31 +447,6 @@ TF-A, `meta-adtf` points the recipe at the submodule (Q13).
 Not yet run. The human project owner runs these (D7). All from the repo
 root.
 
-Add the layers and BitBake, shallow, at `yocto-6.0.2`:
-
-```
-git clone --depth 1 --branch yocto-6.0.2 \
-    https://github.com/openembedded/bitbake.git bitbake
-git submodule add https://github.com/openembedded/bitbake.git bitbake
-git config -f .gitmodules submodule.bitbake.branch 2.18
-
-git clone --depth 1 --branch yocto-6.0.2 \
-    https://github.com/openembedded/openembedded-core.git openembedded-core
-git submodule add https://github.com/openembedded/openembedded-core.git \
-    openembedded-core
-git config -f .gitmodules submodule.openembedded-core.branch wrynose
-
-# only for DISTRO = "poky" (Q4)
-git clone --depth 1 --branch yocto-6.0.2 \
-    https://git.yoctoproject.org/meta-yocto meta-yocto
-git submodule add https://git.yoctoproject.org/meta-yocto meta-yocto
-git config -f .gitmodules submodule.meta-yocto.branch wrynose
-
-for s in bitbake openembedded-core meta-yocto; do
-    git config -f .gitmodules submodule.$s.shallow true
-done
-```
-
 Add Linux, shallow, and protected against accidental deep clones:
 
 ```
@@ -432,12 +463,13 @@ If the branch has moved past `0eb3d176c` by then, check out the recipe's
 commit instead: `git -C linux fetch --depth 1 origin <commit>` and
 `git -C linux checkout <commit>`.
 
-Remove `imx-manifest` (D7):
+Remove `imx-manifest` (D7), and `meta-freescale` once Q14 is settled:
 
 ```
 git submodule deinit imx-manifest
 git rm imx-manifest
 rm -rf .git/modules/imx-manifest
+# later, the same three commands with meta-freescale
 ```
 
 Then commit `.gitmodules` and the new and removed submodule paths together.
@@ -445,23 +477,28 @@ Then commit `.gitmodules` and the new and removed submodule paths together.
 How other people get the submodules after cloning this repo:
 
 ```
-git submodule update --init --depth 1
+git submodule update --init
 git submodule update --init --depth 1 --checkout linux   # only if needed
 ```
 
 ## Build instructions
 
-Incomplete: the distro depends on Q4, `meta-adtf` does not exist yet, and
-none of this has been run yet. All commands run from the root of this repo.
+Incomplete: how the layers get on disk depends on Q14 and the distro on
+Q4, `meta-adtf` does not exist yet, and none of this has been run yet.
+Below, `$LAYERS` is the directory where the layer setup tool puts
+`bitbake`, `openembedded-core`, `meta-yocto` and `meta-freescale`. All
+commands run from the root of this repo. With `bitbake-setup`, the tool
+creates the build directory itself, so these setup lines change and the
+build directory may move (it must stay ignored by git, D6).
 
 Set up the build directory (once). Because `/opt/bitbake` is on `PATH` and
 is the wrong BitBake version, `oe-init-build-env` must be used, which puts
-`bitbake/bin` first:
+`$LAYERS/bitbake/bin` first:
 
 ```
-source openembedded-core/oe-init-build-env yocto-build/imx93-frdm
-bitbake-layers add-layer ../../meta-freescale
-bitbake-layers add-layer ../../meta-yocto/meta-poky   # only for poky, Q4
+source $LAYERS/openembedded-core/oe-init-build-env yocto-build/imx93-frdm
+bitbake-layers add-layer $LAYERS/meta-freescale
+bitbake-layers add-layer $LAYERS/meta-yocto/meta-poky   # only for poky, Q4
 bitbake-layers add-layer ../../meta-adtf
 bitbake-config-build enable-fragment adtf/board/imx93-frdm
 ```
@@ -550,3 +587,17 @@ Q13. **How to build TF-A from the `imx-atf` submodule:** `externalsrc` (as
      With the second option, `SRCREV` could be read from the submodule at
      parse time, so the parent repo's submodule pointer is the only record
      of the commit.
+
+Q14. **Layer setup tool: `repo` or `bitbake-setup`?** (See "Layer setup
+     tools".) `bitbake-setup` is part of BitBake, also creates the build
+     directory and enables fragments, shares layer clones, downloads and
+     sstate between setups, records the exact revisions in a git repo, and
+     `meta-freescale` ships a configuration for it that we could adapt
+     (dropping the layers we don't need). It is newer, so its interface
+     may still change, and its default layout (`<top>/<setup>/layers`,
+     `build`, `config`) replaces our `yocto-build/` plan. `repo` is mature
+     and NXP's standard, but needs our own manifest, a separate
+     build-directory setup, and explicit mirrors for sharing. Proposal:
+     `bitbake-setup`, with our own JSON configuration committed in this
+     repo (e.g. `meta-adtf/bitbake-setup/imx93-frdm.conf.json`) and the top
+     directory outside the repo (e.g. `~/yocto-builds`).
